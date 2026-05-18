@@ -1,0 +1,34 @@
+name: verify-108
+
+# Temporary workflow to verify the Windows execute fix from issue #108
+# on a real Windows runner. Delete this file + `.github/scripts/verify_108.py`
+# after the issue is confirmed fixed.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/108
+
+jobs:
+  windows-execute:
+    name: Windows execute smoke
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12
+
+      - name: Show resolved pydantic-ai-backend version
+        run: uv pip show pydantic-ai-backend
+
+      - name: Run #108 verification
+        run: uv run python .github/scripts/verify_108.py
