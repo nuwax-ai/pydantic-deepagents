@@ -178,3 +178,9 @@ MultilineInput {
     border: tall $accent;
     padding: 0 1;
 }
+
+#fork-view-body {
+    height: 1fr;
+    width: 1fr;
+    display: none;
+}

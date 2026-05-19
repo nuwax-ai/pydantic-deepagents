@@ -389,6 +389,8 @@ def create_cli_agent(  # noqa: C901
         include_liteparse=effective_liteparse,
         # Self-improvement
         include_improve=True,
+        # Live Run Forking — CLI surface (`/fork`, branch tabs, `/merge`) requires this on.
+        forking=True,
         # Web tools — explicit params override config
         web_search=(
             web_search if web_search is not None else (config.web_search if not lean else False)

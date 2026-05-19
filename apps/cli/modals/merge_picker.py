@@ -1,0 +1,274 @@
+"""Merge picker modal — opens on ``/merge`` to pick a winning branch.
+
+Renders the Stage 2 :class:`BranchDiffReport` as a side-by-side per-branch
+summary: status, list of touched paths, and the first few diff lines per
+path. The user presses ``1`` / ``2`` to pick the corresponding branch
+(matching the issue's two-branch Stage 3 limit). Returns the chosen
+branch id or ``None`` on cancel.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import Static
+
+if TYPE_CHECKING:
+    from pydantic_deep.types import BranchChange, BranchDiffReport, BranchStatus
+
+_DIFF_PREVIEW_LINES = 14
+
+
+class MergePickerModal(ModalScreen["str | None"]):
+    """Pick the winner of an active fork.
+
+    Stage 3 caps branches at 2, so the modal hard-codes ``1`` / ``2`` key
+    bindings. Stage 4 lifts the cap and can generalise this to N keys.
+    """
+
+    DEFAULT_CSS = """
+    MergePickerModal {
+        align: center middle;
+    }
+    MergePickerModal > #merge-container {
+        width: 100;
+        max-height: 36;
+        border: tall $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    MergePickerModal > #merge-container > #merge-title {
+        height: 1;
+        text-style: bold;
+    }
+    MergePickerModal > #merge-container > #merge-meta {
+        height: auto;
+        color: $text-muted;
+        margin: 0 0 1 0;
+    }
+    MergePickerModal > #merge-container > #merge-panels {
+        height: 1fr;
+    }
+    MergePickerModal .merge-panel {
+        width: 1fr;
+        padding: 1;
+        border: round $surface-lighten-2;
+    }
+    MergePickerModal .merge-panel-header {
+        text-style: bold;
+        height: 1;
+    }
+    MergePickerModal .merge-path {
+        margin: 1 0 0 0;
+    }
+    MergePickerModal .merge-diff {
+        color: $text-muted;
+    }
+    MergePickerModal .merge-empty {
+        color: $text-disabled;
+    }
+    MergePickerModal > #merge-container > #merge-actions {
+        height: 1;
+        margin: 1 0 0 0;
+        text-style: bold;
+    }
+    """
+
+    BINDINGS = [
+        Binding("1", "pick_first", "Pick branch 1"),
+        Binding("2", "pick_second", "Pick branch 2"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(
+        self,
+        report: BranchDiffReport,
+        branches: list[BranchStatus],
+        label_to_id: dict[str, str],
+    ) -> None:
+        super().__init__()
+        self._report = report
+        self._branches = branches
+        self._id_to_label: dict[str, str] = {bid: label for label, bid in label_to_id.items()}
+        ordered: list[str] = []
+        for label, bid in label_to_id.items():
+            ordered.append(bid)
+            self._id_to_label.setdefault(bid, label)
+        for status in branches:
+            if status.id not in ordered:
+                ordered.append(status.id)
+                self._id_to_label.setdefault(status.id, status.label)
+        self._ordered_ids = ordered
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="merge-container"):
+            yield Static(
+                f"[bold]Resolve fork[/bold] · {self._report.fork_id}",
+                id="merge-title",
+            )
+            score = self._report.summary.agreement_score
+            yield Static(
+                f"agreement: {score:.2f}  ·  touched paths: "
+                f"{self._report.summary.total_paths_touched}",
+                id="merge-meta",
+            )
+            with Horizontal(id="merge-panels"):
+                for slot, branch_id in enumerate(self._ordered_ids, start=1):
+                    yield self._render_branch_panel(slot, branch_id)
+            yield Static(self._action_hint(), id="merge-actions")
+
+    def _action_hint(self) -> str:
+        keys = "  ·  ".join(
+            f"[bold reverse] {i + 1} [/] {self._id_to_label.get(bid, bid)[:12]}"
+            for i, bid in enumerate(self._ordered_ids[:2])
+        )
+        return f"{keys}    [dim]Esc[/dim] cancel"
+
+    def _render_branch_panel(self, slot: int, branch_id: str) -> Vertical:
+        status = next((s for s in self._branches if s.id == branch_id), None)
+        label = self._id_to_label.get(branch_id, branch_id)
+        header = f"[{slot}] [bold]{label}[/bold]  ·  {status.state if status else '?'}"
+
+        panel = Vertical(classes="merge-panel")
+        items: list[Any] = [Static(header, classes="merge-panel-header")]
+
+        touched_changes = self._touched_changes_for(branch_id)
+        if not touched_changes:
+            items.append(Static("[dim]no changes[/dim]", classes="merge-empty"))
+        else:
+            for path, change in touched_changes:
+                added, removed = _count_changes(change.unified_diff_vs_parent)
+                stats = f"  ·  [green]+{added}[/green] [red]-{removed}[/red]"
+                items.append(
+                    Static(
+                        f"[bold]{path}[/bold]  ·  {change.operation}{stats}",
+                        classes="merge-path",
+                    )
+                )
+                if change.unified_diff_vs_parent.strip():
+                    items.append(_DiffPreview(change.unified_diff_vs_parent))
+
+        scroll = VerticalScroll(*items)
+        panel.compose_add_child(scroll)
+        return panel
+
+    def _touched_changes_for(self, branch_id: str) -> list[tuple[str, BranchChange]]:
+        results: list[tuple[str, BranchChange]] = []
+        for path_diff in self._report.paths:
+            change = path_diff.branches.get(branch_id)
+            if change is None or change.operation == "untouched":
+                continue
+            results.append((path_diff.path, change))
+        return results
+
+    def action_pick_first(self) -> None:
+        if self._ordered_ids:
+            self.dismiss(self._ordered_ids[0])
+
+    def action_pick_second(self) -> None:
+        if len(self._ordered_ids) >= 2:
+            self.dismiss(self._ordered_ids[1])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+def _diff_preview(unified_diff: str, limit: int | None = _DIFF_PREVIEW_LINES) -> str:
+    """Render a colourised, header-stripped preview of a unified diff.
+
+    Drops the ``---``/``+++`` file-name headers (they're already shown above
+    the snippet via the ``path`` row) so the entire ``limit`` budget goes to
+    actual changes. ``limit=None`` renders all lines (used by the expanded
+    state of :class:`_DiffPreview`). Colours: green for ``+``, red for ``-``,
+    cyan for ``@@`` hunk markers, dim for context.
+    """
+    if not unified_diff.strip():
+        return ""
+    rendered: list[str] = []
+    truncated = False
+    for line in unified_diff.splitlines():
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        if line.startswith("@@"):
+            rendered.append(f"  [cyan]{line}[/cyan]")
+        elif line.startswith("+"):
+            rendered.append(f"  [green]{line}[/green]")
+        elif line.startswith("-"):
+            rendered.append(f"  [red]{line}[/red]")
+        else:
+            rendered.append(f"  [dim]{line}[/dim]")
+        if limit is not None and len(rendered) >= limit:
+            truncated = True
+            break
+    if truncated:
+        rendered.append("  [dim]…[/dim]")
+    return "\n".join(rendered)
+
+
+def _meaningful_diff_lines(unified_diff: str) -> int:
+    """Count diff lines that survive header stripping — used to decide expandability."""
+    count = 0
+    for line in unified_diff.splitlines():
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        count += 1
+    return count
+
+
+class _DiffPreview(Static):
+    """Per-file diff snippet with click-to-expand toggle.
+
+    Collapsed by default — shows ``_DIFF_PREVIEW_LINES`` meaningful lines and
+    a ``(click to expand)`` hint when the underlying diff has more. Clicking
+    swaps to the full diff with a ``(click to collapse)`` hint. Diffs that
+    fit in the preview budget have no hint and ignore clicks.
+    """
+
+    DEFAULT_CSS = """
+    _DiffPreview {
+        color: $text-muted;
+    }
+    _DiffPreview.expandable {
+        link-color: $accent;
+    }
+    """
+
+    def __init__(self, unified_diff: str) -> None:
+        self._diff = unified_diff
+        self._expanded = False
+        self._expandable = _meaningful_diff_lines(unified_diff) > _DIFF_PREVIEW_LINES
+        super().__init__(self._compose_content(), classes="merge-diff")
+        if self._expandable:
+            self.add_class("expandable")
+
+    def _compose_content(self) -> str:
+        if self._expanded:
+            body = _diff_preview(self._diff, limit=None)
+            hint = "  [dim](click to collapse)[/dim]"
+        else:
+            body = _diff_preview(self._diff, limit=_DIFF_PREVIEW_LINES)
+            hint = "  [dim](click to expand)[/dim]" if self._expandable else ""
+        return body + ("\n" + hint if hint else "")
+
+    def on_click(self) -> None:
+        if not self._expandable:
+            return
+        self._expanded = not self._expanded
+        self.update(self._compose_content())
+
+
+def _count_changes(unified_diff: str) -> tuple[int, int]:
+    """Count `+`/`-` lines (excluding the `+++`/`---` headers)."""
+    added = removed = 0
+    for line in unified_diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed

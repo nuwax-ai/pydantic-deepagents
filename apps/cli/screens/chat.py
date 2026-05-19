@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import Screen
 
 from apps.cli.messages import (
@@ -31,6 +32,11 @@ from apps.cli.messages import (
     ToolCallStarted,
     UserSubmitted,
 )
+from apps.cli.text_heuristics import looks_like_error
+from apps.cli.widgets.branch_panel import BranchPanelWidget
+from apps.cli.widgets.fork_badge import ForkBadgeWidget
+from apps.cli.widgets.fork_overview import ForkOverviewWidget
+from apps.cli.widgets.fork_tabs import OVERVIEW_TAB_ID, ForkTabsWidget
 from apps.cli.widgets.header import DeepHeader
 from apps.cli.widgets.input_area import InputArea
 from apps.cli.widgets.message_list import MessageList
@@ -39,6 +45,8 @@ from apps.cli.widgets.queued_panel import QueuedWidget
 from apps.cli.widgets.side_panel import SidePanel
 from apps.cli.widgets.status_bar import StatusBar
 from pydantic_deep.deps import DEFAULT_USAGE_LIMITS
+
+_FORK_POLL_INTERVAL_S: float = 0.5
 
 
 class ChatScreen(Screen):
@@ -53,15 +61,22 @@ class ChatScreen(Screen):
         Binding("ctrl+k", "show_todos", "TODOs"),
         Binding("ctrl+l", "clear_screen", "Clear"),
         Binding("ctrl+r", "search_messages", "Search"),
+        Binding("tab", "cycle_branch_tab", "Cycle branch", show=False),
+        Binding("enter", "merge_focused_branch", "Merge focused branch", show=False),
         Binding("pageup", "scroll_up", "Scroll up", show=False),
         Binding("pagedown", "scroll_down", "Scroll down", show=False),
     ]
+
+    _poll_timer: Any = None
 
     def compose(self) -> ComposeResult:
         yield DeepHeader()
         with Horizontal(id="main-layout"):
             with Vertical(id="messages-pane"):
                 yield MessageList()
+                yield ForkTabsWidget()
+                with Vertical(id="fork-view-body"):
+                    yield ForkOverviewWidget()
             yield SidePanel()
         yield StatusBar()
         yield InputArea()
@@ -384,13 +399,70 @@ class ChatScreen(Screen):
 
     # ── User input handling ───────────────────────────────────────
 
-    async def on_user_submitted(self, event: UserSubmitted) -> None:
+    #: Slash commands allowed while a fork is active — everything else is blocked
+    #: because a new ``agent.run()`` would overwrite ``deps.fork_coordinator``.
+    _FORK_ALLOWED_COMMANDS = frozenset(
+        {"/merge", "/help", "/cost", "/tokens", "/version", "/quit", "/exit", "/q", "/copy"}
+    )
+
+    async def on_user_submitted(self, event: UserSubmitted) -> None:  # noqa: C901
         """Handle user submitting a prompt."""
+        import re
+
         text = event.text
 
         app = self.app
+        active_fork = app.active_fork
+
+        if active_fork is not None:
+            match = re.match(r"^>>(\w+)\s+(.*)", text)
+            if match is not None:
+                branch_id_or_label, msg = match.group(1), match.group(2).strip()
+                if msg:
+                    state = active_fork.branch_state(branch_id_or_label)
+                    if state is None:
+                        app.notify(
+                            f"unknown branch `{branch_id_or_label}` — "
+                            "use `>>{label} <msg>` with a live branch label.",
+                            severity="warning",
+                        )
+                        return
+                    if state != "running":
+                        app.notify(
+                            f"branch `{branch_id_or_label}` is {state} — cannot steer. "
+                            "Use /merge to resolve the fork.",
+                            severity="warning",
+                        )
+                        return
+                    delivered = await active_fork.steer_branch(branch_id_or_label, msg)
+                    if delivered:
+                        preview = msg[:40] + ("…" if len(msg) > 40 else "")
+                        app.notify(f"→ {branch_id_or_label}: {preview}")
+                        return
+
+            # ── Slash commands during fork — only inspection allow-list ──
+            if text.startswith("/") and not text.startswith("//"):
+                cmd = text.split(maxsplit=1)[0].lower()
+                if cmd in self._FORK_ALLOWED_COMMANDS:
+                    app.handle_command(text)  # type: ignore[attr-defined]
+                    return
+                app.notify(
+                    f"fork active — `{cmd}` is blocked. Use `>>{{label}} <msg>` to steer "
+                    "a branch, or `/merge` to resolve.",
+                    severity="warning",
+                )
+                return
+
+            if not text.startswith("!"):
+                app.notify(
+                    "fork active — use `>>{label} <msg>` to steer a branch, "
+                    "or `/merge` to resolve.",
+                    severity="warning",
+                )
+                return
+
         queue = app.queue
-        task = app._agent_task
+        task = app.agent_task
         is_running = task is not None and not task.done()
 
         # Mid-run: route to queue. `>>` prefix = steering, plain text = follow-up.
@@ -460,8 +532,6 @@ class ChatScreen(Screen):
         """Run the agent and stream results directly to widgets."""
         import asyncio
 
-        from apps.cli.widgets.input_area import HintsBar
-
         app = self.app
         if getattr(app, "agent", None) is None:
             app.notify("No agent configured — use /provider to set up", severity="error")  # type: ignore
@@ -475,14 +545,11 @@ class ChatScreen(Screen):
         app.last_response = ""  # type: ignore
         assistant = msg_list.begin_assistant_message()
 
-        with contextlib.suppress(Exception):
-            self.query_one(HintsBar).update("[dim]Esc[/dim] to interrupt")
-
         task = asyncio.create_task(self._agent_stream_worker(text, assistant, msg_list, header))
-        app._agent_task = task
+        app.agent_task = task
 
         def _on_done(t: asyncio.Task[None]) -> None:
-            app._agent_task = None
+            app.agent_task = None
             exc = t.exception()
             if exc:
                 app.notify(f"Agent error: {exc}", severity="error", timeout=10)  # type: ignore
@@ -638,11 +705,7 @@ class ChatScreen(Screen):
                                     if call_id in pending:
                                         args, start = pending.pop(call_id)
                                         elapsed = _time.monotonic() - start
-                                    is_error = (
-                                        "error" in raw.lower()[:100]
-                                        or "exit code 1" in raw.lower()
-                                        or "traceback" in raw.lower()[:200]
-                                    )
+                                    is_error = looks_like_error(raw, check_exit_code=True)
                                     log_kwargs: dict[str, Any] = {
                                         "tool": tool_name,
                                         "call_id": call_id,
@@ -1110,6 +1173,289 @@ class ChatScreen(Screen):
     def action_focus_input(self) -> None:
         """Esc returns focus to the input."""
         self.query_one(InputArea).focus_input()
+
+    def enter_fork_view(self, session: Any) -> None:
+        """Swap the main message pane to fork view and start polling.
+
+        Called by ``DeepApp.watch_active_fork`` when a fork starts.
+        """
+        with contextlib.suppress(NoMatches):
+            self.query_one(MessageList).display = False
+        tabs = self.query_one(ForkTabsWidget)
+        tabs.add_class("active")
+        body = self.query_one("#fork-view-body", Vertical)
+        body.display = True
+        overview = self.query_one(ForkOverviewWidget)
+        overview.set_active(True)
+
+        coordinator = session.coordinator
+        parent_model = getattr(self.app, "model_name", None) or None
+        branch_models: dict[str, str] = {}
+        for branch_id in session.handle.branches:
+            runtime = coordinator.branches[branch_id]
+            effective_model = runtime.spec.model or parent_model
+            if effective_model:
+                branch_models[branch_id] = effective_model
+            panel = BranchPanelWidget(
+                branch_id=branch_id,
+                label=runtime.spec.label,
+                model=effective_model,
+            )
+            body.mount(panel)
+            self._attach_branch_done_callback(panel, runtime)
+        with contextlib.suppress(NoMatches):
+            overview.set_models(branch_models)
+
+        with contextlib.suppress(NoMatches):
+            self.query_one(ForkBadgeWidget).show()
+
+        self._poll_timer = self.set_interval(_FORK_POLL_INTERVAL_S, self._poll_fork_state)
+
+        self._poll_fork_state()
+
+    def exit_fork_view(self) -> None:
+        """Tear down fork widgets and resume normal chat. Called on /merge or abort."""
+        if self._poll_timer is not None:
+            # Timer.stop() can raise during app teardown (loop closing); broader catch.
+            with contextlib.suppress(Exception):
+                self._poll_timer.stop()
+            self._poll_timer = None
+
+        # panel.remove() schedules async removal — broader catch covers teardown races.
+        with contextlib.suppress(Exception):
+            for panel in list(self.query(BranchPanelWidget)):
+                panel.remove()
+
+        with contextlib.suppress(NoMatches):
+            tabs = self.query_one(ForkTabsWidget)
+            tabs.statuses = []
+            tabs.active_id = OVERVIEW_TAB_ID
+            tabs.remove_class("active")
+        with contextlib.suppress(NoMatches):
+            body = self.query_one("#fork-view-body", Vertical)
+            body.display = False
+        with contextlib.suppress(NoMatches):
+            self.query_one(ForkOverviewWidget).set_active(False)
+        with contextlib.suppress(NoMatches):
+            self.query_one(ForkBadgeWidget).hide()
+        with contextlib.suppress(NoMatches):
+            self.query_one(MessageList).display = True
+
+    def _attach_branch_done_callback(self, panel: BranchPanelWidget, runtime: Any) -> None:
+        """Hook the branch's task so panel renders final messages on completion."""
+        import asyncio
+
+        task: asyncio.Task[Any] = runtime.task
+        app = self.app
+
+        def _on_done(t: asyncio.Task[Any]) -> None:
+            def _apply() -> None:
+                if t.cancelled():
+                    panel.mark_status("terminated")
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    panel.mark_status("failed")
+
+                    import traceback as _tb
+
+                    from apps.cli.debug_log import get_logger as _gl
+
+                    _log = _gl()
+                    tb_str = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+                    _log.error(f"Branch {panel.label} failed:\n{tb_str}")
+                    with contextlib.suppress(Exception):
+                        msg = str(exc) or type(exc).__name__
+                        app.notify(
+                            f"Branch {panel.label} failed: {msg[:120]}",
+                            severity="error",
+                            timeout=10,
+                        )
+                    return
+                result = t.result()
+                panel.mark_status("done")
+                with contextlib.suppress(Exception):  # pragma: no cover - defensive
+                    panel.replay_messages(list(result.all_messages()))
+
+            try:
+                app.call_from_thread(_apply)
+            except RuntimeError:  # pragma: no cover - falling back when not on a worker
+                _apply()
+
+        task.add_done_callback(_on_done)
+
+    def _poll_fork_state(self) -> None:
+        """Refresh tab badges, overview rows, and the side-panel cost chip."""
+        app = self.app
+        session = app.active_fork
+        if session is None:  # pragma: no cover - timer should be stopped before this
+            return
+        statuses = session.inspect()
+        with contextlib.suppress(Exception):
+            tabs = self.query_one(ForkTabsWidget)
+            tabs.statuses = statuses
+        with contextlib.suppress(Exception):
+            overview = self.query_one(ForkOverviewWidget)
+            overview.statuses = statuses
+        with contextlib.suppress(Exception):
+            badge = self.query_one(ForkBadgeWidget)
+            badge.update_from_statuses(list(statuses), self._fork_cost_estimate(session))
+
+    def _fork_cost_estimate(self, session: Any) -> float | None:
+        """Sum per-branch cost from CostTracking capability if registered, else None."""
+        agent = getattr(self.app, "agent", None)
+        if agent is None:
+            return None
+        root = getattr(agent, "root_capability", None)
+        candidates: list[Any] = []
+        if root is not None:
+            candidates = list(getattr(root, "capabilities", []) or [])
+        if not candidates:
+            candidates = list(getattr(agent, "_capabilities", []) or [])
+        has_cost_tracking = any(type(c).__name__ == "CostTracking" for c in candidates)
+        if not has_cost_tracking:
+            return None
+        total = 0.0
+        found = False
+        for runtime in session.coordinator.branches.values():
+            branch_cap = getattr(runtime.deps, "cost_tracking", None)
+            if branch_cap is not None:
+                cost = getattr(branch_cap, "cumulative_cost", None)
+                if cost is not None:
+                    total += float(cost)
+                    found = True
+        return total if found else None
+
+    def focus_branch_tab(self, branch_id: str) -> None:
+        """Show one branch panel and hide the others (or show overview if ``OVERVIEW_TAB_ID``)."""
+        with contextlib.suppress(Exception):
+            overview = self.query_one(ForkOverviewWidget)
+            overview.set_active(branch_id == OVERVIEW_TAB_ID)
+        for panel in self.query(BranchPanelWidget):
+            panel.set_active(panel.branch_id == branch_id)
+            if panel.branch_id == branch_id:
+                with contextlib.suppress(Exception):
+                    panel.focus()
+        if branch_id == OVERVIEW_TAB_ID:
+            with contextlib.suppress(Exception):
+                self.query_one(ForkOverviewWidget).focus()
+
+    def on_fork_tabs_widget_branch_tab_selected(
+        self, event: ForkTabsWidget.BranchTabSelected
+    ) -> None:
+        """React to programmatic tab cycling — show the corresponding panel."""
+        self.focus_branch_tab(event.branch_id)
+
+    def action_cycle_branch_tab(self) -> None:
+        """Tab keybinding — cycle through overview + each branch panel."""
+        if self.app.active_fork is None:
+            return
+        with contextlib.suppress(Exception):
+            tabs = self.query_one(ForkTabsWidget)
+            tabs.cycle_focus()
+
+    async def action_merge_focused_branch(self) -> None:
+        """Enter keybinding — pick the currently-focused branch as the merge winner.
+
+        Only fires when:
+        - a fork is active
+        - the focused tab is a branch panel (not the overview)
+        - the branch has finished (``state == "done"``)
+
+        Otherwise it's a no-op so the keypress can bubble up (e.g. to the chat input).
+        """
+        app = self.app
+        session = app.active_fork
+        if session is None:
+            return
+        try:
+            tabs = self.query_one(ForkTabsWidget)
+        except Exception:  # pragma: no cover - defensive
+            return
+        branch_id = tabs.active_id
+        if branch_id == OVERVIEW_TAB_ID:
+            return
+        runtime = session.coordinator.branches.get(branch_id)
+        if runtime is None or runtime.status.state != "done":
+            if runtime is not None:
+                app.notify(
+                    f"branch `{runtime.spec.label}` is {runtime.status.state} — "
+                    "wait for `done` before merging.",
+                    severity="warning",
+                )
+            return
+        try:
+            result = await session.merge(branch_id)
+        except Exception as e:  # pragma: no cover - defensive
+            from apps.cli.debug_log import get_logger
+
+            get_logger().error("Merge failed", exc_info=True)
+            app.notify(f"Merge failed: {e}", severity="error")
+            return
+
+        from pydantic_deep.processors.patch import patch_tool_calls_processor
+
+        app.message_history = patch_tool_calls_processor(list(result.history_after_merge))
+        label = runtime.spec.label
+        app.active_fork = None
+        app.notify(f"Merged: kept branch {label}", severity="information")
+
+    async def fork_action_escape(self) -> bool:
+        """Handle Esc while a fork is active. Returns True if Esc was consumed.
+
+        Called from :meth:`DeepApp.action_escape_key` before the default
+        agent-interrupt behaviour, so branch-tab Esc and overview Esc reach
+        the user's confirm prompt instead of cancelling an unrelated task.
+        """
+        from apps.cli.modals.confirm import ConfirmModal
+
+        app = self.app
+        session = app.active_fork
+        if session is None:
+            return False
+
+        try:
+            tabs = self.query_one(ForkTabsWidget)
+        except Exception:  # pragma: no cover - defensive
+            return False
+        active = tabs.active_id
+
+        if active == OVERVIEW_TAB_ID:
+
+            async def _on_abort(decision: bool | None) -> None:
+                if decision:
+                    await session.abort()
+                    app.active_fork = None
+                    app.notify("Fork aborted")
+
+            app.push_screen(ConfirmModal("Abort the entire fork?"), _on_abort)
+            return True
+
+        runtime = session.coordinator.branches.get(active)
+        label = runtime.spec.label if runtime else active
+
+        if runtime is not None and runtime.status.state != "running":
+            state = runtime.status.state
+            if state == "done":
+                app.notify(
+                    f"branch `{label}` is done — press Enter to merge it, "
+                    "or /merge for the picker.",
+                    severity="information",
+                )
+            else:
+                app.notify(
+                    f"branch `{label}` is {state} — nothing to terminate.",
+                    severity="information",
+                )
+            return True
+
+        async def _on_terminate(decision: bool | None) -> None:
+            if decision:
+                await session.terminate_branch(active)
+                app.notify(f"Branch {label} terminated")
+
+        app.push_screen(ConfirmModal(f"Terminate branch '{label}'?"), _on_terminate)
+        return True
 
     def action_toggle_multiline(self) -> None:
         self.query_one(InputArea).toggle_multiline()

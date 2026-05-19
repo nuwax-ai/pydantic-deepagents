@@ -9,8 +9,8 @@ This page is the canonical reference for the whole feature; it grows incremental
 | Stage | Status | What it ships |
 |---|---|---|
 | 1 — Kernel | **Shipped** | [`LiveForkCapability`][pydantic_deep.capabilities.forking.LiveForkCapability], [`ForkCoordinator`][pydantic_deep.toolsets.forking.coordinator.ForkCoordinator], [`BranchOverlay`][pydantic_deep.toolsets.forking.isolation.BranchOverlay], 4 agent-facing tools |
-| 2 — Diff Branches | Coming | `diff_branches()` report consumed by judge / IDE |
-| 3 — CLI | Coming | `/fork`, branch tabs, `MergePickerModal`, `!{branch_id}` routing |
+| 2 — Diff Branches | **Shipped** | `diff_branches()` report consumed by judge / IDE |
+| 3 — CLI | **Shipped** | `/fork`, branch tabs, `MergePickerModal`, `>>{branch_id}` routing |
 | 4 — N branches + budget | Coming | `max_branches>2`, `max_depth>1`, per-branch `budget_usd` enforcement |
 | 5 — IDE materializer | Coming | Disk mirror under `.pydantic-deep/forks/`, `pycharm diff` / `code --diff` integration |
 | 6 — Autonomous judge | Coming | `MergeStrategy.kind="auto"` / `"auto_with_fallback"` / `"vote"`, confidence scoring |
@@ -81,7 +81,7 @@ The agent drives the fork itself — `fork_run`, `inspect_branches`, `merge_or_s
 | `backend` | `"copy"` | Wraps the parent backend in a [`BranchOverlay`][pydantic_deep.toolsets.forking.isolation.BranchOverlay] — reads fall through, writes land in an overlay. `"share_readonly"` / `"share"` accepted for forward-compat. |
 | `memory` | `"copy"` | Recorded; concrete effect lands when memory gets a separate path (Stage 4). |
 | `todos` | `"copy"` | Branch starts with an empty todo list. |
-| `message_queue` | `"isolated"` | Branch gets a fresh `MessageQueue` — external steering with `!a` is per-branch (delivered in Stage 3). |
+| `message_queue` | `"isolated"` | Branch gets a fresh `MessageQueue` — external steering with `>>a` is per-branch (delivered in Stage 3). |
 | `team_bus` | `"shared"` | Default-shared so branches can talk via the existing peer-to-peer bus. |
 
 ## Agent-facing tools
@@ -201,6 +201,75 @@ For each path, the builder labels how the branches relate:
 
 Pass `paths=["src/app.py", "src/utils.py"]` to restrict the report to specific paths. Filtered paths that no branch touched still surface as `unanimous_no_change`, so the report stays transparent — silence is never confused with "no diff."
 
+## CLI integration
+
+Stage 3 ships forking in the Textual TUI (`pydantic-deep` CLI). Once `forking=True` is on the agent — flipped automatically by `create_cli_agent()` — every TUI session can fork the current run.
+
+```text
+┌─ pydantic-deep ────────────────────────────────────────┐
+│ [● a] [✓ b] [+ overview]                               │  ← ForkTabsWidget
+│ ──────────────────────────────────────────────────────│
+│ branch a · ● running                                   │
+│ > implement using a fast hash table                    │  ← BranchPanelWidget
+│ tool: write src/store.py                               │
+│ ...                                                    │
+│                                                        │
+│ ┌─ side ──────────┐                                   │
+│ │ FORK: 2 · 1 …  │  ← ForkBadgeWidget                  │
+│ └─────────────────┘                                   │
+└────────────────────────────────────────────────────────┘
+```
+
+### Slash commands
+
+| Command | Action |
+|---|---|
+| `/fork` | Open the picker modal, collect two `(label, steer)` pairs, spawn branches. Blocked while an agent run is in flight (Esc first, then `/fork`). |
+| `/merge` | Open the merge picker — render each branch's diff snippets, pick the winner with `1`/`2`. Adopts the winner's `history_after_merge` into the parent. |
+
+### Branch tabs
+
+The tab strip shows one chip per branch plus a `+` overview pseudo-tab. Status badges mirror [`BranchStatus.state`][pydantic_deep.types.BranchStatus]: `●` running, `✓` done, `✗` failed, `⊘` terminated. `Tab` cycles focus through `overview → branch 0 → branch 1 → overview`.
+
+### Steering a branch
+
+`MessageQueue` per-branch routing (`message_queue="isolated"`, the default) means each branch has its own queue. The CLI exposes this via the `>>` steer prefix from [Message Queue (#100)](message-queue.md), extended with a branch id / label:
+
+```text
+>>a focus on tests
+```
+
+routes the message to branch `a`'s queue only. Branch `b` is unaffected. If the label doesn't match a live branch, the input is rejected with a notification — unlike the `!` shell prefix, `>>` is steering-only and never falls through. `!` keeps its #100 meaning during a fork (shell command).
+
+While a fork is active, plain prompts and most slash commands are blocked with a notification. The allow-list is `/merge`, `/help`, `/cost`, `/tokens`, `/version`, `/quit`, `/copy`. Everything else would spawn a new `agent.run()` and silently overwrite `deps.fork_coordinator`.
+
+### Esc semantics
+
+- **On a branch tab:** confirms "terminate `{label}`?" then calls [`ForkCoordinator.terminate_branch`][pydantic_deep.toolsets.forking.coordinator.ForkCoordinator.terminate_branch]. The other branches keep running.
+- **On the overview tab:** confirms "abort the entire fork?" then calls [`ForkCoordinator.aclose`][pydantic_deep.toolsets.forking.coordinator.ForkCoordinator.aclose] which cancels every branch task.
+
+Branch tab Esc reuses the same `task.cancel()` mechanism as the existing in-run Esc interrupt (#96).
+
+### Quick start (TUI)
+
+```bash
+$ pydantic-deep
+> Help me name a Python library for distributed locks.
+[…agent thinks…]
+> /fork
+[modal: branch a = "whimsical", steer = "playful names"]
+[modal: branch b = "technical", steer = "factual names"]
+…both branches run in parallel, status badges update live…
+> >>a make them shorter
+[delivered to branch a only]
+> /merge
+[modal shows each branch's diff and final pitch]
+[press 1 to pick branch a]
+"Merged: kept branch whimsical"
+```
+
+Once the merge resolves, `app.message_history` is the winner's `history_after_merge`. Stage 1's coordinator has already saved the `post-fork:{fork_id}` checkpoint anchor — `/load` lets you rewind there later.
+
 ## API reference
 
 - [`LiveForkCapability`][pydantic_deep.capabilities.forking.LiveForkCapability] — capability registered on the agent. Owns `max_branches`, `max_depth`, `store`, and the per-run [`ForkCoordinator`][pydantic_deep.toolsets.forking.coordinator.ForkCoordinator] allocated via `for_run`.
@@ -270,8 +339,8 @@ for branch_id, runtime in coordinator.branches.items():
 
 Stage 1 deliberately shipped the minimum kernel. The following are **not** supported until later stages:
 
-- **CLI surface** (`/fork`, branch tabs, merge picker modal, `!{branch_id}` routing) — Stage 3.
 - **More than 2 branches or fork-of-fork** — Stage 4 lifts `max_branches` and `max_depth`.
+- **Live per-token streaming inside branch panels** — Stage 3 renders each branch's final messages once its `asyncio.Task` completes; mid-run streaming inside the panel would require reworking Stage 1's `coordinator.fork()` task spawn. Status badges (`●`/`✓`/`✗`/`⊘`) update live via a 0.5 s poller.
 - **Per-branch budget enforcement** (`BranchSpec.budget_usd`) — accepted but ignored in Stage 1. Stage 4 wires enforcement.
 - **External diff tool integration** (`pycharm diff`, `code --diff`) — Stage 5.
 - **Autonomous merge** (judge model, confidence scoring, vote mode) — Stage 6.

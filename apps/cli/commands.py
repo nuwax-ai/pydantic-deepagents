@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from apps.cli.app import DeepApp
 
+from apps.cli.text_heuristics import looks_like_error
 from apps.cli.widgets.status_bar import StatusBar
 
 
@@ -359,12 +360,8 @@ async def dispatch_command(app: DeepApp, command: str) -> None:  # noqa: C901
                             content = str(part.content)
                             assistant_msg = msg_list.current_assistant
                             if assistant_msg is not None:
-                                is_error = (
-                                    "error" in content.lower()[:100]
-                                    or "traceback" in content.lower()[:200]
-                                )
                                 assistant_msg.complete_tool_call(
-                                    part.tool_call_id, content, 0.0, is_error
+                                    part.tool_call_id, content, 0.0, looks_like_error(content)
                                 )
 
                 # Finalize any open assistant message
@@ -578,6 +575,12 @@ async def dispatch_command(app: DeepApp, command: str) -> None:  # noqa: C901
         webbrowser.open("https://github.com/vstorm-co/pydantic-deepagents/issues")
         app.notify("Opened GitHub issues in browser")
 
+    elif cmd == "/fork":
+        await _dispatch_fork(app)
+
+    elif cmd == "/merge":
+        await _dispatch_merge(app)
+
     else:
         # Check if it's a skill command (e.g. /code-review)
         # Skills are loaded via the command picker from _discover_skill_commands()
@@ -602,3 +605,97 @@ async def dispatch_command(app: DeepApp, command: str) -> None:  # noqa: C901
                 app.notify(f"Failed to run skill: {skill_name}", severity="error")
         else:
             app.notify(f"Unknown command: {cmd}", severity="warning")
+
+
+# ── Fork dispatch helpers ─────────────────────────────────────────────
+
+
+async def _dispatch_fork(app: DeepApp) -> None:
+    """Handle ``/fork`` — open the picker modal and spawn branches on submit."""
+    from apps.cli.forking import (
+        ForkingNotEnabledError,
+        resolve_capability,
+        start_fork_from_cli,
+    )
+    from apps.cli.modals.fork_picker import ForkPickerModal
+    from pydantic_deep.types import BranchSpec
+
+    if app.agent is None:
+        app.notify("Agent not configured — use /provider first", severity="error")
+        return
+    if resolve_capability(app.agent) is None:
+        app.notify(
+            "Forking is not enabled on this agent. Restart with forking=True.",
+            severity="error",
+        )
+        return
+    if app.active_fork is not None:
+        app.notify("Fork already active — /merge to resolve first", severity="warning")
+        return
+    task = app.agent_task
+    if task is not None and not task.done():
+        app.notify("Agent run in progress — press Esc or wait, then /fork", severity="warning")
+        return
+
+    async def _on_specs(specs: list[BranchSpec] | None) -> None:
+        if specs is None:
+            return
+        try:
+            session = await start_fork_from_cli(app, specs)
+        except ForkingNotEnabledError as e:
+            app.notify(str(e), severity="error")
+            return
+        except Exception as e:  # pragma: no cover - defensive
+            from apps.cli.debug_log import get_logger
+
+            get_logger().error("Fork failed", exc_info=True)
+            app.notify(f"Fork failed: {e}", severity="error")
+            return
+        app.active_fork = session
+        labels = ", ".join(s.label for s in specs)
+        app.notify(f"Forked: {labels}", severity="information")
+
+    app.push_screen(ForkPickerModal(), _on_specs)
+
+
+async def _dispatch_merge(app: DeepApp) -> None:
+    """Handle ``/merge`` — open the picker modal and apply the chosen winner."""
+    from apps.cli.modals.merge_picker import MergePickerModal
+
+    session = app.active_fork
+    if session is None:
+        app.notify("No active fork — type /fork to start one", severity="warning")
+        return
+    report = session.build_diff()
+    if report is None:  # pragma: no cover - defensive: session implies a live fork
+        app.notify("Cannot build diff report", severity="error")
+        return
+    statuses = session.inspect()
+
+    async def _on_pick(branch_id: str | None) -> None:
+        if branch_id is None:
+            return
+        active = app.active_fork
+        if active is None:  # pragma: no cover - defensive: another flow cleared it
+            return
+        try:
+            result = await active.merge(branch_id)
+        except Exception as e:  # pragma: no cover - defensive
+            from apps.cli.debug_log import get_logger
+
+            get_logger().error("Merge failed", exc_info=True)
+            app.notify(f"Merge failed: {e}", severity="error")
+            return
+
+        from pydantic_deep.processors.patch import patch_tool_calls_processor
+
+        app.message_history = patch_tool_calls_processor(list(result.history_after_merge))
+        runtime = active.coordinator.branches.get(branch_id)
+        label = runtime.spec.label if runtime else branch_id
+        app.active_fork = None
+        app.notify(f"Merged: kept branch {label}", severity="information")
+
+    app.push_screen(
+        MergePickerModal(report, statuses, session.label_to_id),
+        _on_pick,
+    )

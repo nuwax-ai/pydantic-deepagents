@@ -9,7 +9,7 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
 
-_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+from apps.cli.widgets.spinner import Spinner
 
 
 def _format_args_preview(tool_name: str, args: dict[str, Any]) -> str:
@@ -105,7 +105,6 @@ class ToolCallWidget(Widget):
     elapsed: reactive[float] = reactive(0.0)
     expanded: reactive[bool] = reactive(False)
 
-    _spinner_index: int = 0
     _timer_handle: object | None = None
 
     def __init__(
@@ -123,6 +122,7 @@ class ToolCallWidget(Widget):
         self.is_subagent_tool = is_subagent_tool
         self.result_text: str = ""
         self.result_preview: str = ""
+        self._spinner = Spinner()
 
     @property
     def is_hidden_tool(self) -> bool:
@@ -159,14 +159,11 @@ class ToolCallWidget(Widget):
             self._refresh_header()
             self._refresh_output()
             return
-        self._timer_handle = self.set_interval(1 / 12, self._tick_spinner)
-
-    def _tick_spinner(self) -> None:
-        if self.status != "pending":
-            return
-        self._spinner_index = (self._spinner_index + 1) % len(_SPINNER_FRAMES)
-        self.elapsed += 1 / 12
-        self._refresh_header()
+        self._timer_handle = self._spinner.start_on(
+            self,
+            gate=lambda: self.status == "pending",
+            on_advance=self._refresh_header,
+        )
 
     def complete(self, result: str, elapsed: float, error: bool = False) -> None:
         """Mark this tool call as completed."""
@@ -242,8 +239,8 @@ class ToolCallWidget(Widget):
                 call_str = f"{self.tool_name}([dim]{args_preview}[/dim])"
             else:
                 call_str = self.tool_name
-            frame = _SPINNER_FRAMES[self._spinner_index]
-            right = f"{frame} {self.elapsed:.1f}s"
+            frame = self._spinner.frame
+            right = f"{frame} {self._spinner.elapsed:.1f}s"
             header.update(f"{prefix}◆ {call_str}  {right}")
         elif self.status == "success":
             call_str = f"{self.tool_name}({args_preview})" if args_preview else self.tool_name
