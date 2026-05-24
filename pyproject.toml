@@ -41,7 +41,7 @@ classifiers = [
 ]
 dependencies = [
     "pydantic-ai-slim[web-fetch]>=1.97.0",
-    "pydantic-ai-todo>=0.2.1",
+    "pydantic-ai-todo>=0.2.2",
     "pydantic-ai-backend[console]>=0.2.7",
     "summarization-pydantic-ai>=0.1.4",
     "subagents-pydantic-ai>=0.2.4",
