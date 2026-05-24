@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.21] - 2026-05-24
+
+### Changed
+
+- **Bumped `pydantic-ai-todo` floor from `>=0.2.1` to `>=0.2.2`** ([#114](https://github.com/vstorm-co/pydantic-deepagents/pull/114), auto-opened by the new Renovate config). Brings in [`pydantic-ai-todo 0.2.2`](https://github.com/vstorm-co/pydantic-ai-todo/releases/tag/0.2.2): the new `AsyncRedisStorage` backend (Redis Hash + companion List, session-scoped, multi-tenant, event-emitter integration) plus a follow-up batch of correctness fixes (`remove_todo` atomicity via single pipeline, Redis Cluster–safe hash-tagged keys, idempotent `initialize()`).
+
 ## [0.3.20] - 2026-05-18
 
 ### Fixed
