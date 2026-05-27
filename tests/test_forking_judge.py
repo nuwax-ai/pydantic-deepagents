@@ -561,6 +561,27 @@ async def test_detect_vote_models_spans_multiple_vendors_when_keys_present(
     assert len(vendors) >= 2
 
 
+async def test_detect_vote_models_includes_openrouter_when_key_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter models are added to the pool when OPENROUTER_API_KEY is set."""
+    for env in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "MISTRAL_API_KEY",
+        "GROQ_API_KEY",
+        "COHERE_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "OPENROUTER_API_KEY",
+    ):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    models = _detect_vote_models("anthropic:claude-haiku-4-5-20251001")
+    assert any("openrouter" in m for m in models)
+
+
 # ---------------------------------------------------------------------------
 # Extra coverage — stuck-loop / retry counters.
 # ---------------------------------------------------------------------------
@@ -1572,7 +1593,7 @@ async def test_run_tests_materializes_overlay_writes_as_real_file(tmp_path: Any)
     overlay = BranchOverlay(backend)
     overlay.write("marker.txt", "branch\n")
 
-    with overlay.snapshot(_Path(deps.backend.root_dir)) as snap:  # type: ignore[attr-defined]
+    with overlay.snapshot(_Path(deps.backend.root_dir)) as snap:
         target = _Path(snap) / "marker.txt"
         assert target.exists()
         assert target.is_file()
@@ -1625,9 +1646,9 @@ async def test_run_tests_for_branch_returns_none_for_invalid_root_dir_type(
     """
     from pydantic_ai_backends import LocalBackend
 
-    class _OddRootBackend(LocalBackend):
+    class _OddRootBackend(LocalBackend):  # type: ignore[misc]
         @property
-        def root_dir(self) -> Any:  # type: ignore[override]
+        def root_dir(self) -> Any:
             # Callable shape — the runner's isinstance check should reject this.
             return lambda: "not-a-path"
 

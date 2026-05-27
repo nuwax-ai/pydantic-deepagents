@@ -1488,4 +1488,5 @@ __all__ = [
     "ForkBranchLimitError",
     "ForkCoordinator",
     "ForkDepthLimitError",
+    "ResolveOutcome",
 ]
