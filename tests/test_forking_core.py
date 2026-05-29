@@ -2209,60 +2209,74 @@ def test_collect_state_permission_error_returns_silently(tmp_path: Path) -> None
     assert out == {}
 
 
-def test_collect_state_symlink_mtime_oserror_fallback(tmp_path: Path) -> None:
-    """_collect_state uses mtime=0.0 when os.stat raises OSError for a symlink."""
-    import os
-    from unittest.mock import patch
-
+def test_collect_state_symlink_signature_oserror_fallback(tmp_path: Path) -> None:
+    """A dangling symlink → content signature falls back to '' (unreadable)."""
     from pydantic_deep.toolsets.forking.isolation import _collect_state
 
     snap = tmp_path / "snap"
     snap.mkdir()
-    target = tmp_path / "real.py"
-    target.write_text("t")
-    link = snap / "real.py"
-    link.symlink_to(target)
+    link = snap / "dangling.py"
+    link.symlink_to(tmp_path / "does_not_exist.py")
 
-    def _failing_stat(path: str, *, follow_symlinks: bool = True) -> os.stat_result:
-        raise OSError("stat error")
+    out: dict[str, tuple[bool, str]] = {}
+    _collect_state(snap, snap, out)
 
-    with patch("os.stat", side_effect=_failing_stat):
-        out: dict[str, tuple[bool, float]] = {}
-        _collect_state(snap, snap, out)
-
-    assert "real.py" in out
-    is_sym, mtime = out["real.py"]
+    assert "dangling.py" in out
+    is_sym, sig = out["dangling.py"]
     assert is_sym
-    assert mtime == 0.0
+    assert sig == ""
 
 
-def test_collect_state_file_mtime_oserror_fallback(tmp_path: Path) -> None:
-    """_collect_state uses mtime=0.0 when entry.stat raises OSError for a real file."""
+def test_collect_state_file_signature_oserror_fallback(tmp_path: Path) -> None:
+    """_collect_state uses signature='' when a file's content can't be read."""
     from unittest.mock import MagicMock, patch
 
     from pydantic_deep.toolsets.forking.isolation import _collect_state
 
     snap = tmp_path / "snap"
     snap.mkdir()
-    real_file = snap / "file.py"
-    real_file.write_text("content")
 
-    # Patch os.scandir to return a mock entry whose .stat() raises OSError.
+    # Mock entry pointing at a path open() can't read → _file_signature returns ''.
     mock_entry = MagicMock()
     mock_entry.name = "file.py"
-    mock_entry.path = str(real_file)
+    mock_entry.path = str(snap / "nonexistent.py")
     mock_entry.is_symlink.return_value = False
     mock_entry.is_file.return_value = True
     mock_entry.is_dir.return_value = False
-    mock_entry.stat.side_effect = OSError("stat fail")
 
     with patch("os.scandir", return_value=iter([mock_entry])):
-        out: dict[str, tuple[bool, float]] = {}
+        out: dict[str, tuple[bool, str]] = {}
         _collect_state(snap, snap, out)
 
-    assert "file.py" in out
-    _, mtime = out["file.py"]
-    assert mtime == 0.0
+    assert "nonexistent.py" in out
+    _, sig = out["nonexistent.py"]
+    assert sig == ""
+
+
+def test_snapshot_state_detects_content_change_with_preserved_mtime(tmp_path: Path) -> None:
+    """A same-size content rewrite with mtime restored is still detected.
+
+    Regression for mtime-only detection: the signature is content-based, so a
+    write that preserves mtime (or lands within the mtime tick) still changes
+    the signature.
+    """
+    import os
+
+    from pydantic_deep.toolsets.forking.isolation import _snapshot_state
+
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    f = snap / "a.py"
+    f.write_text("aaaa")
+    st = os.stat(f)
+    pre = _snapshot_state(snap)
+
+    # Same byte length, different content, mtime restored to the original.
+    f.write_text("bbbb")
+    os.utime(f, (st.st_atime, st.st_mtime))
+    post = _snapshot_state(snap)
+
+    assert pre["a.py"][1] != post["a.py"][1]
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ based on a :class:`BranchIsolation` policy.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -199,20 +200,43 @@ def _branch_snapshot(
         yield tmp_dir
 
 
-def _snapshot_state(snap: Path) -> dict[str, tuple[bool, float]]:
-    """Return ``{rel_path: (is_symlink, mtime)}`` for every file in *snap*.
+def _file_signature(path: str) -> str:
+    """Return a content signature (``size:sha256``) for the file at ``path``.
+
+    Follows symlinks so the signature reflects the bytes actually exposed.
+    A content hash — not mtime — is used so an in-place rewrite within the
+    filesystem's coarse mtime tick, or a tool that preserves mtime
+    (``cp -p``, ``touch -r``, some formatters), is still detected as a
+    change. Returns ``""`` when the file can't be read.
+    """
+    try:
+        digest = hashlib.sha256()
+        size = 0
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                size += len(chunk)
+                digest.update(chunk)
+        return f"{size}:{digest.hexdigest()}"
+    except OSError:
+        return ""
+
+
+def _snapshot_state(snap: Path) -> dict[str, tuple[bool, str]]:
+    """Return ``{rel_path: (is_symlink, content_signature)}`` for every file in *snap*.
 
     Uses :func:`os.scandir` recursively with ``followlinks=False`` so
     symlinked directories are not traversed (they remain as single
     symlink entries in the parent directory scan, not as trees).
-    Directories in :data:`_SNAP_SKIP_DIRS` are skipped.
+    Directories in :data:`_SNAP_SKIP_DIRS` are skipped. The signature is a
+    size + content hash (see :func:`_file_signature`) so a change is
+    detected by content, not mtime.
     """
-    state: dict[str, tuple[bool, float]] = {}
+    state: dict[str, tuple[bool, str]] = {}
     _collect_state(snap, snap, state)
     return state
 
 
-def _collect_state(root: Path, current: Path, out: dict[str, tuple[bool, float]]) -> None:
+def _collect_state(root: Path, current: Path, out: dict[str, tuple[bool, str]]) -> None:
     try:
         entries = list(os.scandir(current))
     except (PermissionError, OSError):
@@ -223,22 +247,14 @@ def _collect_state(root: Path, current: Path, out: dict[str, tuple[bool, float]]
         p = Path(entry.path)
         rel = str(p.relative_to(root))
         if entry.is_symlink():
-            try:
-                mtime = os.stat(entry.path, follow_symlinks=True).st_mtime
-            except OSError:
-                mtime = 0.0
-            out[rel] = (True, mtime)
+            out[rel] = (True, _file_signature(entry.path))
         elif entry.is_file(follow_symlinks=False):
-            try:
-                mtime = entry.stat(follow_symlinks=False).st_mtime
-            except OSError:
-                mtime = 0.0
-            out[rel] = (False, mtime)
+            out[rel] = (False, _file_signature(entry.path))
         elif entry.is_dir(follow_symlinks=False):
             child_count = len(out)
             _collect_state(root, p, out)
             if len(out) == child_count:
-                out[rel + "/"] = (False, 0.0)
+                out[rel + "/"] = (False, "")
 
 
 def _capture_overlay_write(overlay: Any, abs_path: str, snap_file: Path) -> None:
@@ -277,8 +293,8 @@ def _capture_overlay_delete(overlay: Any, abs_path: str) -> None:
 def _propagate_mutations(
     snap: Path,
     parent_root: Path,
-    pre: dict[str, tuple[bool, float]],
-    post: dict[str, tuple[bool, float]],
+    pre: dict[str, tuple[bool, str]],
+    post: dict[str, tuple[bool, str]],
     overlay: Any,
 ) -> None:
     """Diff *pre* vs *post* snapshot states and mirror changes into *overlay*.
@@ -289,11 +305,12 @@ def _propagate_mutations(
       so the deletion propagates to the parent on merge.
     - **Created** (absent before, exists after): ``overlay.write(abs_path, content)``
       so the new file is part of the branch diff.
-    - **Modified** (symlink replaced by real file, or real file changed):
-      ``overlay.write(abs_path, new_content)`` to capture the update.
+    - **Modified** (symlink replaced by real file, or content signature
+      changed): ``overlay.write(abs_path, new_content)`` to capture the update.
 
-    Unchanged symlinks (still pointing to the same parent file) are
-    skipped — they need no overlay entry.
+    Files whose content signature is unchanged are skipped — they need no
+    overlay entry. Detection is by content signature, not mtime, so a write
+    that preserves mtime is still caught.
     """
     all_paths = set(pre) | set(post)
     for rel in all_paths:
@@ -320,12 +337,12 @@ def _propagate_mutations(
             _capture_overlay_write(overlay, abs_path, snap_file)
             continue
 
-        pre_sym, pre_mtime = pre[rel]
-        post_sym, post_mtime = post[rel]
+        pre_sym, pre_sig = pre[rel]
+        post_sym, post_sig = post[rel]
 
         symlink_replaced_by_file = pre_sym and not post_sym
-        real_file_changed = not post_sym and pre_mtime != post_mtime
-        symlink_target_changed = pre_sym and post_sym and pre_mtime != post_mtime
+        real_file_changed = not post_sym and pre_sig != post_sig
+        symlink_target_changed = pre_sym and post_sym and pre_sig != post_sig
 
         if symlink_replaced_by_file or real_file_changed or symlink_target_changed:
             _capture_overlay_write(overlay, abs_path, snap_file)
