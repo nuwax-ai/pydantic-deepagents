@@ -46,7 +46,8 @@ agent = create_deep_agent(output_style="json-only")
 agent = create_deep_agent(output_style="bullet")
 ```
 
-`json-only` is a prompt — not a guarantee"
+**`json-only` is a prompt — not a guarantee.**
+
 The model is *asked* to produce valid JSON, but nothing validates the
 result. If you know the shape of the output, prefer `output_type` (see
 below) — it gives you a real guarantee, `json-only` doesn't.
