@@ -96,6 +96,8 @@ plugins:
           - concepts/backends.md: Backend abstraction for file operations
           - concepts/toolsets.md: Available toolsets and custom tools
           - concepts/skills.md: Skills system
+        Capabilities:
+          - capabilities/live-fork.md: Live Run Forking (parallel agent branches)
         Advanced Features:
           - advanced/human-in-the-loop.md: Human-in-the-loop patterns
           - advanced/subagents.md: Subagent delegation
@@ -213,6 +215,8 @@ nav:
     - Backends: concepts/backends.md
     - Toolsets: concepts/toolsets.md
     - Skills: concepts/skills.md
+  - Capabilities:
+      - capabilities/live-fork.md
   - Advanced Features:
     - advanced/human-in-the-loop.md
     - advanced/subagents.md

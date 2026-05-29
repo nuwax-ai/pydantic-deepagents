@@ -341,6 +341,10 @@ Always reference Python objects with backticks and link to API reference:
 The [`create_deep_agent`][pydantic_deep.agent.create_deep_agent] function creates a configured agent.
 ```
 
+### Rename a Function (private → public)
+
+When renaming a function from private (`_fun`) to public (`fun`), be careful with test names. A naive find-and-replace of `_fun` → `fun` will mangle test names like `test_fun` into `testfun`, which is invalid. Always rename the function first, then update test names separately (or use a more targeted replacement that won't match the `test_` prefix).
+
 ### Rename a Class
 
 When renaming a class, add deprecation warning:

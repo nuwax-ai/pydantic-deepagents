@@ -199,6 +199,44 @@ class TestCoerceValue:
     def test_string_value(self) -> None:
         assert _coerce_value("model", "openai:gpt-4o") == "openai:gpt-4o"
 
+    def test_fork_branch_lists_keep_positional_length(self) -> None:
+        # The persisted string encodes one slot per branch; an all-default
+        # 1-branch config ("") must coerce to [None], not [] (which would drop
+        # the positional length and desync from fork_branch_count).
+        assert _coerce_value("fork_branch_models", "") == [None]
+        assert _coerce_value("fork_branch_budgets", "") == [None]
+        assert _coerce_value("fork_branch_models", ",") == [None, None]
+        assert _coerce_value("fork_branch_models", "a:b,") == ["a:b", None]
+        assert _coerce_value("fork_branch_budgets", "1.5,") == ["1.5", None]
+
+    def test_fork_branch_models_round_trips_single_default(self, tmp_path: Path) -> None:
+        # A 1-branch all-default models list persists and reloads as [None],
+        # keeping length aligned with fork_branch_count=1.
+        cfg_path = tmp_path / "config.toml"
+        set_config_value(cfg_path, "fork_branch_count", "1")
+        set_config_value(cfg_path, "fork_branch_models", "")
+        loaded = load_config(cfg_path)
+        assert loaded.fork_branch_models == [None]
+        assert len(loaded.fork_branch_models) == loaded.fork_branch_count
+
+    def test_optional_float_none(self) -> None:
+        # float | None fields may be cleared to None.
+        for field in ("temperature", "fork_aggregate_budget_usd"):
+            assert _coerce_value(field, "none") is None
+            assert _coerce_value(field, "null") is None
+            assert _coerce_value(field, "") is None
+
+    def test_float_value(self) -> None:
+        assert _coerce_value("fork_confidence_threshold", "0.5") == 0.5
+        assert _coerce_value("temperature", "0.7") == 0.7
+
+    def test_non_optional_float_rejects_none(self) -> None:
+        # fork_confidence_threshold is a non-optional float (default 0.80); empty/
+        # none/null must raise rather than store None and later crash validation.
+        for bad in ("none", "null", ""):
+            with pytest.raises(ValueError, match="requires a numeric value"):
+                _coerce_value("fork_confidence_threshold", bad)
+
 
 class TestWriteToml:
     """Tests for _write_toml()."""

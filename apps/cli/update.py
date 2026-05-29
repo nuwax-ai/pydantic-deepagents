@@ -108,14 +108,28 @@ def check_for_update(cache_path: Path | None = None) -> UpdateInfo | None:
 def run_update() -> int:
     """Upgrade pydantic-deep to the latest version.
 
-    Uses ``uv tool upgrade`` when uv is available, otherwise falls back to
-    ``pip install --upgrade``.  Returns the subprocess exit code.
+    Tries ``uv tool upgrade`` first. Falls back to ``pip install --upgrade``
+    only when uv reports that pydantic-deep is not a uv-managed tool (the
+    original install was done with pip). Transient uv failures — network
+    outages, lock conflicts, registry errors — are surfaced directly instead
+    of being masked by a pip invocation that may not even exist inside a uv
+    tool's isolated venv.
     """
     uv = _find_uv()
     if uv:
-        result = subprocess.run([uv, "tool", "upgrade", "pydantic-deep"])
+        result = subprocess.run(
+            [uv, "tool", "upgrade", "pydantic-deep"],
+            capture_output=True,
+            text=True,
+        )
         if result.returncode == 0:
             return 0
+        # Only fall back to pip when uv explicitly says the package is not a
+        # managed tool — the #122 scenario. Any other non-zero exit (network,
+        # lock, registry) is returned as-is to surface the real error.
+        combined = (result.stdout + result.stderr).lower()
+        if "is not installed" not in combined:
+            return result.returncode
     return subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", "pydantic-deep[cli]"]
     ).returncode

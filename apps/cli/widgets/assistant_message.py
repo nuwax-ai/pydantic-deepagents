@@ -107,6 +107,10 @@ class AssistantMessage(Widget):
             self.mount(widget)
         return widget
 
+    def has_tool_call(self, call_id: str) -> bool:
+        """True when this message holds the tool-call widget for ``call_id``."""
+        return call_id in self._tool_widgets
+
     def complete_tool_call(
         self,
         call_id: str,
@@ -124,9 +128,9 @@ class AssistantMessage(Widget):
         self._thinking += delta
         if self._thinking_widget is not None:
             self._thinking_widget.display = True
-            # Show truncated thinking with prefix
             lines = self._thinking.strip().splitlines()
-            preview = lines[-1][:120] if lines else ""
+            raw = lines[-1][:120] if lines else ""
+            preview = raw.replace("[", r"\[")
             self._thinking_widget.update(f"[dim italic]thinking: {preview}[/dim italic]")
 
     def finalize_thinking(self) -> None:
@@ -135,7 +139,8 @@ class AssistantMessage(Widget):
             return
         lines = self._thinking.strip().splitlines()
         n = len(lines)
-        first = lines[0][:100] if lines else ""
+        raw = lines[0][:100] if lines else ""
+        first = raw.replace("[", r"\[")
         self._thinking_widget.update(f"[dim italic]thought ({n} lines): {first}...[/dim italic]")
 
     def append_text(self, delta: str) -> None:
