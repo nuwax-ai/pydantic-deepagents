@@ -269,12 +269,10 @@ def create_cli_agent(  # noqa: C901
     else:
         effective_backend = backend or LocalBackend(root_dir=root)
 
-    # Build hooks list
     hooks: list[Hook] = []
     if effective_allow_list is not None:
         hooks.append(_make_shell_allow_list_hook(effective_allow_list))
 
-    # Build middleware list
     middleware: list[Any] = []
     if extra_middleware:
         middleware.extend(extra_middleware)
@@ -288,7 +286,6 @@ def create_cli_agent(  # noqa: C901
         )
     )
 
-    # Append working directory context
     # When using Docker sandbox, the agent operates inside the container at /workspace
     instruction_root = "/workspace" if effective_sandbox == "docker" else str(root.resolve())
     working_dir_section = (
@@ -423,28 +420,21 @@ def create_cli_agent(  # noqa: C901
         skill_directories=skill_dirs if effective_skills else None,
         interrupt_on=interrupt_on,
         model_settings=effective_model_settings or None,
-        # Filesystem & execution
         include_execute=True,
         include_filesystem=True,
-        # Planning & task management
         include_todo=effective_todo,
         include_plan=effective_plan,
         plans_dir=plans_dir,
-        # Delegation
         include_subagents=effective_subagents,
         include_builtin_subagents=effective_subagents,
-        # Skills
         include_skills=effective_skills,
         # Memory (store in .pydantic-deep/main/MEMORY.md)
         include_memory=effective_memory,
         memory_dir=".pydantic-deep",
         # Context files (auto-discover AGENTS.md, SOUL.md)
         context_discovery=_context_disc if not lean else False,
-        # Teams
         include_teams=(include_teams if include_teams is not None else config.include_teams),
-        # Document parsing
         include_liteparse=effective_liteparse,
-        # Self-improvement
         include_improve=True,
         forking=LiveForkCapability(test_command=_detect_fork_test_command(effective_backend)),
         # Web tools — explicit params override config
@@ -454,7 +444,6 @@ def create_cli_agent(  # noqa: C901
         web_fetch=(
             web_fetch if web_fetch is not None else (config.web_fetch if not lean else False)
         ),
-        # Thinking
         thinking=(
             thinking if thinking is not None else (config.thinking_effort if not lean else False)
         ),
@@ -464,7 +453,6 @@ def create_cli_agent(  # noqa: C901
             if session_id
             else ".pydantic-deep/messages.json"
         ),
-        # Context management
         context_manager=not lean,
         context_manager_max_tokens=None,  # auto-detect from genai-prices
         on_context_update=on_context_update,
@@ -473,19 +461,15 @@ def create_cli_agent(  # noqa: C901
         summarization_model=summarization_model,
         eviction_token_limit=20_000,
         on_eviction=on_eviction,
-        # Cost tracking
         cost_tracking=True,
         on_cost_update=on_cost_update,
-        # Output style
         output_style="concise" if not lean else None,
-        # Middleware & hooks
         hooks=hooks or None,
         middleware=middleware or None,
         toolsets=[local_context] if local_context else None,
         capabilities=extra_capabilities or None,
         # Message queue for mid-run steering and follow-up delivery
         message_queue=queue,
-        # Periodic reminder
         periodic_reminder=_build_reminder_config(
             periodic_reminder, reminder_mode, config, on_reminder, reminder_model
         ),
