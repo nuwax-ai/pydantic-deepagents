@@ -70,6 +70,26 @@ BranchRunnerFunc = Any
 
 _CANCEL_CLEANUP_TIMEOUT_S: float = 1.0
 
+
+async def _reap_process(proc: asyncio.subprocess.Process) -> None:
+    """Terminate (then kill) ``proc`` if it is still running, reaping it.
+
+    Shielded against cancellation so a parent abort mid-``proc.wait()`` cannot
+    leave an orphaned/zombie test subprocess behind.
+    """
+    if proc.returncode is not None:
+        return
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=_CANCEL_CLEANUP_TIMEOUT_S))
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # SIGTERM ignored or we were cancelled mid-wait — escalate to SIGKILL.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await asyncio.shield(asyncio.wait_for(proc.wait(), timeout=_CANCEL_CLEANUP_TIMEOUT_S))
+
 #: Checked in order; first available env var wins the slot in the vote panel.
 _NATIVE_CHEAP_MODELS: tuple[tuple[str, str], ...] = (
     ("ANTHROPIC_API_KEY", "anthropic:claude-haiku-4-5"),
@@ -1045,19 +1065,21 @@ class ForkCoordinator:
             try:
                 returncode = await asyncio.wait_for(proc.wait(), timeout=self.test_timeout_s)
             except asyncio.TimeoutError:
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=_CANCEL_CLEANUP_TIMEOUT_S)
-                except asyncio.TimeoutError:
-                    # SIGTERM ignored — escalate so we don't leak an orphan.
-                    proc.kill()
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(proc.wait(), timeout=_CANCEL_CLEANUP_TIMEOUT_S)
                 logger.warning("branch %s test runner timed out", rt.status.id)
                 return None
-            return 1.0 if returncode == 0 else 0.0
+            else:
+                return 1.0 if returncode == 0 else 0.0
+            finally:
+                # Reap the child on ANY exit — timeout, normal return, or a
+                # CancelledError raised into proc.wait() by a parent abort — so the
+                # test subprocess can never be orphaned/zombied.
+                await _reap_process(proc)
         finally:
-            await loop.run_in_executor(None, snap_ctx.__exit__, None, None, None)
+            # Shield the snapshot tempdir cleanup: it must complete even if this
+            # coroutine is being cancelled, otherwise the temp snapshot dir leaks.
+            await asyncio.shield(
+                loop.run_in_executor(None, snap_ctx.__exit__, None, None, None)
+            )
 
     async def _build_branch_outcomes(self) -> tuple[list[BranchOutcome], str]:
         """Materialise per-branch summaries + the parent's first user message.

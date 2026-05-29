@@ -1279,6 +1279,44 @@ async def test_run_tests_for_branch_returns_zero_on_non_zero_exit(tmp_path: Any)
     assert ratio == 0.0
 
 
+async def test_run_tests_for_branch_reaps_subprocess_on_cancellation(tmp_path: Any) -> None:
+    """Cancelling the runner mid-wait must terminate/kill the test subprocess.
+
+    Regression: previously terminate()/kill() ran only on TimeoutError, so a
+    parent abort while awaiting proc.wait() left an orphaned/zombie child.
+    """
+    coord, bid = await _coordinator_with_local_backend_branch(
+        tmp_path, test_command="sleep 30", test_timeout_s=30.0
+    )
+    rt = coord.branches[bid]
+
+    spawned: list[Any] = []
+    real_spawn = asyncio.create_subprocess_exec
+
+    async def _capturing_spawn(*args: Any, **kwargs: Any) -> Any:
+        proc = await real_spawn(*args, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", _capturing_spawn):
+        task = asyncio.create_task(coord._run_tests_for_branch(rt))
+        # Wait until the subprocess is actually running.
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if spawned:
+                break
+        assert spawned, "subprocess never spawned"
+        proc = spawned[0]
+        assert proc.returncode is None  # still running
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    # The child must have been reaped (terminated/killed), not left as a zombie.
+    await asyncio.wait_for(proc.wait(), timeout=5.0)
+    assert proc.returncode is not None
+
+
 async def test_run_tests_for_branch_returns_none_on_timeout(tmp_path: Any) -> None:
     """Distinguished from ``0.0`` — a timeout is "no signal", not "tests failed"."""
     coord, bid = await _coordinator_with_local_backend_branch(
