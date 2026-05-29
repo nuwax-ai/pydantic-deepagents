@@ -108,6 +108,7 @@ plugins:
           - advanced/teams.md: Agent teams with shared todos
           - advanced/output-styles.md: Output style customization
           - advanced/hooks.md: Claude Code-style lifecycle hooks
+          - advanced/fallback-models.md: Automatic fallback models
           - advanced/memory.md: Persistent agent memory
           - advanced/context-files.md: Project context file injection
           - advanced/eviction.md: Large output eviction

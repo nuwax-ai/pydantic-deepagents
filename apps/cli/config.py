@@ -71,6 +71,7 @@ _BOOL_FIELDS = frozenset(
 _STR_FIELDS = frozenset(
     {
         "model",
+        "fallback_model",
         "theme",
         "charset",
         "reasoning_effort",
@@ -146,6 +147,8 @@ class CliConfig:
     ``"context"`` (compact transcript, no LLM), or ``"llm"`` (default, uses an LLM to summarize)."""
     reminder_model: str | None = None
     """Model used by the ``"llm"`` reminder generator. Defaults to the main model when ``None``."""
+    fallback_model: str | None = None
+    """Fallback model used when the primary model fails (rate limit, 5xx). Set via /model picker."""
     fork_branch_count: int = 2
     """Number of branches the ``/fork`` picker prepares. Set via ``/fork-config``.
     Valid range is ``[1, LiveForkCapability.max_branches]`` (kernel default 10)."""

@@ -67,6 +67,9 @@ class HookEvent(str, Enum):
     BEFORE_MODEL_REQUEST = "before_model_request"
     AFTER_MODEL_REQUEST = "after_model_request"
 
+    # Fallback events
+    MODEL_FALLBACK_TRIGGERED = "model_fallback_triggered"
+
 
 @dataclass
 class HookInput:
@@ -452,6 +455,34 @@ class HooksCapability(AbstractCapability[Any]):
             else:
                 await _run_hook(hook, hook_input, backend)
         return response
+
+    async def dispatch_model_fallback(
+        self,
+        primary: str,
+        fallback: str,
+        error: Exception,
+        backend: Any,
+    ) -> None:
+        """Dispatch MODEL_FALLBACK_TRIGGERED hooks outside the normal capability lifecycle.
+
+        Called by the fallback_on handler in create_deep_agent when FallbackModel
+        switches from the primary to a fallback model.
+        """
+        matched = [h for h in self.hooks if h.event == HookEvent.MODEL_FALLBACK_TRIGGERED]
+        if not matched:
+            return
+        sandbox = backend if isinstance(backend, SandboxProtocol) else None
+        hook_input = _build_hook_input(
+            HookEvent.MODEL_FALLBACK_TRIGGERED,
+            "",
+            {"primary": primary, "fallback": fallback},
+            tool_error=error,
+        )
+        for hook in matched:
+            if hook.background:
+                asyncio.create_task(_run_background_hook(hook, hook_input, sandbox))
+            else:
+                await _run_hook(hook, hook_input, sandbox)
 
 
 # Default destructive-command patterns matched against the ``command`` arg of

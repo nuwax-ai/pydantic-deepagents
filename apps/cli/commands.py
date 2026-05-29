@@ -86,14 +86,25 @@ async def dispatch_command(app: DeepApp, command: str) -> None:  # noqa: C901
             app.notify("Failed to copy to clipboard", severity="error")
 
     elif cmd == "/model":
+        from apps.cli.modals.fallback_picker import FallbackPickerModal
         from apps.cli.modals.model_picker import ModelPickerModal
 
-        async def _handle(result: str | None) -> None:
-            if result:
-                app.model_name = result
-                app.reconfigure_agent(model=result)
+        async def _handle_fallback(primary: str, fallback: str | None) -> None:
+            app.set_fallback_and_reconfigure(primary, fallback)
 
-        app.push_screen(ModelPickerModal(app.model_name), _handle)
+        async def _handle_model(result: str | None) -> None:
+            if result:
+                primary = result
+
+                def _on_fallback_picked(fb: str | None) -> None:
+                    app.call_later(_handle_fallback, primary, fb)
+
+                app.push_screen(
+                    FallbackPickerModal(result, app.fallback_model_name or None),
+                    _on_fallback_picked,
+                )
+
+        app.push_screen(ModelPickerModal(app.model_name), _handle_model)
 
     elif cmd == "/context":
         from apps.cli.modals.context_view import ContextViewModal

@@ -1,5 +1,10 @@
 """Extended tests for agent factory to reach 100% coverage."""
 
+from collections.abc import Awaitable
+from typing import cast
+
+from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.test import TestModel
 
 from pydantic_deep import (
@@ -383,3 +388,189 @@ class TestDeepAgentDepsExtended:
             thinking=False,
         )
         assert agent is not None
+
+
+FALLBACK_MODEL = TestModel()
+FALLBACK_MODEL_2 = TestModel()
+
+
+class TestFallbackModel:
+    def test_fallback_model_instance_wraps_in_fallback_model(self) -> None:
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=FALLBACK_MODEL,
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        assert len(agent.model.models) == 2
+
+    def test_fallback_model_list_wraps_chain(self) -> None:
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=[FALLBACK_MODEL, FALLBACK_MODEL_2],
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        assert len(agent.model.models) == 3
+
+    def test_fallback_model_none_does_not_wrap(self) -> None:
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=None,
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert not isinstance(agent.model, FallbackModel)
+
+    async def test_fallback_hook_dispatched_on_model_api_error(self) -> None:
+        from pydantic_deep.capabilities.hooks import Hook, HookEvent, HookInput, HookResult
+
+        received: list[HookInput] = []
+
+        async def handler(inp: HookInput) -> HookResult:
+            received.append(inp)
+            return HookResult()
+
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=FALLBACK_MODEL,
+            hooks=[Hook(event=HookEvent.MODEL_FALLBACK_TRIGGERED, handler=handler)],
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        # _exception_handlers is a private pydantic-ai FallbackModel attribute; there is
+        # no public equivalent that lets us unit-test the fallback_on callable directly.
+        _fallback_on = cast(
+            "Awaitable[bool]",
+            agent.model._exception_handlers[0](ModelAPIError("test-model", "rate limit")),
+        )
+        result = await _fallback_on
+        assert result is True
+        assert len(received) == 1
+        assert received[0].tool_input["primary"] is not None
+
+    async def test_fallback_hook_not_triggered_for_non_api_error(self) -> None:
+        from pydantic_deep.capabilities.hooks import Hook, HookEvent, HookInput, HookResult
+
+        received: list[HookInput] = []
+
+        async def handler(inp: HookInput) -> HookResult:
+            received.append(inp)
+            return HookResult()
+
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=FALLBACK_MODEL,
+            hooks=[Hook(event=HookEvent.MODEL_FALLBACK_TRIGGERED, handler=handler)],
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        # _exception_handlers is a private pydantic-ai FallbackModel attribute; there is
+        # no public equivalent that lets us unit-test the fallback_on callable directly.
+        _fallback_on = cast(
+            "Awaitable[bool]",
+            agent.model._exception_handlers[0](ValueError("not an api error")),
+        )
+        result = await _fallback_on
+        assert result is False
+        assert received == []
+
+    async def test_fallback_hook_not_triggered_for_auth_error(self) -> None:
+        from pydantic_deep.capabilities.hooks import Hook, HookEvent, HookInput, HookResult
+
+        received: list[HookInput] = []
+
+        async def handler(inp: HookInput) -> HookResult:
+            received.append(inp)
+            return HookResult()
+
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=FALLBACK_MODEL,
+            hooks=[Hook(event=HookEvent.MODEL_FALLBACK_TRIGGERED, handler=handler)],
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        # Auth errors must not be forwarded to the next model — they are permanent.
+        for auth_msg in ("401 unauthorized", "403 forbidden", "unauthorized access"):
+            _fallback_on = cast(
+                "Awaitable[bool]",
+                agent.model._exception_handlers[0](ModelAPIError("test-model", auth_msg)),
+            )
+            result = await _fallback_on
+            assert result is False, f"Expected False for auth error: {auth_msg!r}"
+        assert received == []
+
+    def test_fallback_model_always_uses_auth_filtering_without_hooks(self) -> None:
+        """FallbackModel is always wrapped with auth-filtering fallback_on, even when
+        no MODEL_FALLBACK_TRIGGERED hook is registered."""
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=FALLBACK_MODEL,
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        # A custom fallback_on must be installed regardless of hooks.
+        assert agent.model._exception_handlers, "expected a custom fallback_on handler"
+
+    async def test_auth_error_not_forwarded_without_hooks(self) -> None:
+        """Auth errors (401/403) must not trigger fallback even with no hooks registered."""
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=FALLBACK_MODEL,
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        _fallback_on = cast(
+            "Awaitable[bool]",
+            agent.model._exception_handlers[0](ModelAPIError("m", "401 unauthorized")),
+        )
+        result = await _fallback_on
+        assert result is False, "auth error must not trigger fallback (no hooks case)"
+
+    async def test_hook_not_fired_for_last_model_in_exhausted_chain(self) -> None:
+        """When the last model in the chain fails, no MODEL_FALLBACK_TRIGGERED hook fires."""
+        from pydantic_deep.capabilities.hooks import Hook, HookEvent, HookInput, HookResult
+
+        received: list[HookInput] = []
+
+        async def handler(inp: HookInput) -> HookResult:
+            received.append(inp)
+            return HookResult()
+
+        agent = create_deep_agent(
+            model=TEST_MODEL,
+            fallback_model=FALLBACK_MODEL,
+            hooks=[Hook(event=HookEvent.MODEL_FALLBACK_TRIGGERED, handler=handler)],
+            web_search=False,
+            web_fetch=False,
+            thinking=False,
+        )
+        assert isinstance(agent.model, FallbackModel)
+        _fallback_on_raw = agent.model._exception_handlers[0]
+        api_error = ModelAPIError("test-model", "rate limit exceeded")
+
+        # First call: primary fails → hook fires (there is a fallback to try).
+        result1 = await cast("Awaitable[bool]", _fallback_on_raw(api_error))
+        assert result1 is True
+        assert len(received) == 1
+
+        # Second call: last fallback fails (chain exhausted) → hook must NOT fire.
+        result2 = await cast("Awaitable[bool]", _fallback_on_raw(api_error))
+        assert result2 is True
+        assert len(received) == 1, "hook fired for exhausted chain — should be silent"

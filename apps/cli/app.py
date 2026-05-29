@@ -55,6 +55,7 @@ class DeepApp(App):
 
     is_streaming: reactive[bool] = reactive(False)
     model_name: reactive[str] = reactive("")
+    fallback_model_name: reactive[str] = reactive("")
     app_version: reactive[str] = reactive("0.0.0")
     context_pct: reactive[float] = reactive(0.0)
     context_current: reactive[int] = reactive(0)
@@ -154,6 +155,12 @@ class DeepApp(App):
 
     def on_mount(self) -> None:
         self.model_name = self._model
+        try:
+            from apps.cli.config import load_config
+
+            self.fallback_model_name = load_config().fallback_model or ""
+        except Exception as exc:
+            self.notify(f"Could not read fallback model from config: {exc}", severity="warning")
         self.app_version = self._version
         self._seed_fork_settings_from_config()
         self.push_screen(ChatScreen())
@@ -231,10 +238,13 @@ class DeepApp(App):
         self.handle_command("/provider")
 
     def reconfigure_agent(self, model: str | None = None) -> None:
-        """Try to recreate the agent (after API key is set).
+        """Recreate the agent from the current config.
 
-        If model is None, reads from config. If config model fails,
-        tries to detect a working model from available API keys.
+        ``model`` overrides ``config.model`` when provided. ``fallback_model`` is
+        always read from ``config.fallback_model`` — callers that want to change
+        it should write to the config first (see :meth:`set_fallback_and_reconfigure`).
+        If ``model`` is None and the config model lacks an available API key, picks
+        a working model from available keys.
         """
         from apps.cli.config import load_config
         from apps.cli.debug_log import get_logger
@@ -248,13 +258,16 @@ class DeepApp(App):
         if not model:
             effective = self._pick_available_model(effective)
 
-        log.info("Reconfiguring agent", model=effective)
+        effective_fallback = config.fallback_model or None
+
+        log.info("Reconfiguring agent", model=effective, fallback=effective_fallback)
 
         try:
             from apps.cli.agent import create_cli_agent
 
             agent, deps = create_cli_agent(
                 model=effective,
+                fallback_model=effective_fallback,
                 working_dir=self.working_dir,
             )
             self.agent = agent
@@ -262,6 +275,7 @@ class DeepApp(App):
             self.queue = getattr(deps, "message_queue", None)
             self._startup_error = None
             self.model_name = effective
+            self.fallback_model_name = effective_fallback or ""
 
             # Save the working model to config
             try:
@@ -271,11 +285,29 @@ class DeepApp(App):
             except Exception:
                 pass
 
-            log.info("Agent reconfigured successfully", model=effective)
-            self.notify(f"Agent ready! Model: {effective}", severity="information")
+            msg = f"Agent ready! Model: {effective}"
+            if effective_fallback:
+                msg += f" → fallback: {effective_fallback}"
+            log.info(
+                "Agent reconfigured successfully", model=effective, fallback=effective_fallback
+            )
+            self.notify(msg, severity="information")
         except Exception as exc:
             log.error("Agent reconfiguration failed", exc_info=True, model=effective)
             self.notify(f"Still failing: {exc}", severity="error", timeout=10)
+
+    def set_fallback_and_reconfigure(self, model: str, fallback: str | None) -> None:
+        """Persist ``fallback`` to config (empty string clears it), then reconfigure
+        the agent with ``model``. Used by the ``/model`` flow where the user picks a
+        primary model and then chooses a fallback (or "No fallback") in a follow-up
+        modal."""
+        try:
+            from apps.cli.config import DEFAULT_CONFIG_PATH, set_config_value
+
+            set_config_value(DEFAULT_CONFIG_PATH, "fallback_model", fallback or "")
+        except Exception as exc:
+            self.notify(f"Could not persist fallback model: {exc}", severity="warning")
+        self.reconfigure_agent(model=model)
 
     @staticmethod
     def _pick_available_model(current: str) -> str:

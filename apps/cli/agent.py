@@ -110,6 +110,7 @@ def _make_shell_allow_list_hook(allow_list: list[str]) -> Hook:
 
 def create_cli_agent(  # noqa: C901
     model: str | None = None,
+    fallback_model: str | None = None,
     working_dir: str | None = None,
     shell_allow_list: list[str] | None = None,
     on_cost_update: Any | None = None,
@@ -415,6 +416,7 @@ def create_cli_agent(  # noqa: C901
 
     agent = create_deep_agent(
         model=effective_model,
+        fallback_model=fallback_model or config.fallback_model or None,
         instructions=instructions,
         backend=effective_backend,
         skill_directories=skill_dirs if effective_skills else None,

@@ -991,6 +991,56 @@ class TestRunAndModelHooks:
         assert calls == ["bg"]
 
 
+class TestModelFallbackHook:
+    async def test_dispatch_calls_handler(self) -> None:
+        received: list[HookInput] = []
+
+        async def handler(inp: HookInput) -> HookResult:
+            received.append(inp)
+            return HookResult()
+
+        cap = HooksCapability(
+            hooks=[Hook(event=HookEvent.MODEL_FALLBACK_TRIGGERED, handler=handler)]
+        )
+        exc = Exception("rate limit")
+        await cap.dispatch_model_fallback("primary-model", "fallback-model", exc, StateBackend())
+
+        assert len(received) == 1
+        inp = received[0]
+        assert inp.event == HookEvent.MODEL_FALLBACK_TRIGGERED.value
+        assert inp.tool_input["primary"] == "primary-model"
+        assert inp.tool_input["fallback"] == "fallback-model"
+        assert "rate limit" in (inp.tool_error or "")
+
+    async def test_dispatch_no_matching_hooks_is_noop(self) -> None:
+        called: list[str] = []
+
+        async def handler(inp: HookInput) -> HookResult:
+            called.append("called")
+            return HookResult()
+
+        cap = HooksCapability(hooks=[Hook(event=HookEvent.BEFORE_RUN, handler=handler)])
+        await cap.dispatch_model_fallback("p", "f", Exception("err"), StateBackend())
+        assert called == []
+
+    async def test_dispatch_background_hook(self) -> None:
+        received: list[HookInput] = []
+
+        async def handler(inp: HookInput) -> HookResult:
+            received.append(inp)
+            return HookResult()
+
+        cap = HooksCapability(
+            hooks=[Hook(event=HookEvent.MODEL_FALLBACK_TRIGGERED, handler=handler, background=True)]
+        )
+        await cap.dispatch_model_fallback("p", "f", Exception("err"), StateBackend())
+        await asyncio.sleep(0.05)
+        assert len(received) == 1
+
+    def test_model_fallback_triggered_in_hook_event_enum(self) -> None:
+        assert HookEvent.MODEL_FALLBACK_TRIGGERED.value == "model_fallback_triggered"
+
+
 _SecHandler = Callable[[HookInput], Awaitable[HookResult]]
 
 
