@@ -549,7 +549,6 @@ def create_deep_agent(  # noqa: C901
     backend = backend or StateBackend()
     interrupt_on = interrupt_on or {}
 
-    # Build effective subagents list (user-provided + built-ins)
     effective_subagents: list[SubAgentConfig] = list(subagents or [])
     if include_plan and include_subagents:
         from pydantic_deep.toolsets.plan import (
@@ -586,7 +585,6 @@ def create_deep_agent(  # noqa: C901
             for tool in toolset.tools.values():
                 tool.max_retries = max_retries
 
-    # Build toolsets list
     all_toolsets: list[AbstractToolset[DeepAgentDeps]] = []
 
     _todo_proxy: _DepsTodoProxy | None = None
@@ -603,7 +601,6 @@ def create_deep_agent(  # noqa: C901
         # only exists then); an empty interrupt_on stays ungated. Explicit value wins.
         require_execute_approval = interrupt_on.get("execute", any(interrupt_on.values()))
 
-        # Determine if execute should be included
         # If explicitly set, use that; otherwise auto-detect from backend type
         should_include_execute = (
             include_execute if include_execute is not None else isinstance(backend, SandboxProtocol)
@@ -623,7 +620,6 @@ def create_deep_agent(  # noqa: C901
     _subagent_task_manager: Any | None = None
     subagent_toolset: Any | None = None
     if include_subagents:
-        # Subagents use the same model as the main agent
         subagent_model = model
 
         # Deep agent factory for subagents — subagents are full deep agents
@@ -731,7 +727,6 @@ def create_deep_agent(  # noqa: C901
     # Skills toolset
     skills_toolset = None
     if include_skills:
-        # Normalize skill_directories to list[str | BackendSkillsDirectory]
         directories: list[str | BackendSkillsDirectory] | None = None
         if skill_directories:
             directories = []
@@ -875,7 +870,6 @@ def create_deep_agent(  # noqa: C901
         resolved = resolve_style(output_style, styles_dir)
         base_instructions = base_instructions + "\n\n" + format_style_prompt(resolved)
 
-    # Build agent kwargs with optional output_type and history_processors
     agent_create_kwargs: dict[str, Any] = {
         "deps_type": DeepAgentDeps,
         "toolsets": all_toolsets,
@@ -883,7 +877,6 @@ def create_deep_agent(  # noqa: C901
         "retries": retries,
     }
 
-    # Determine if any tools require approval (interrupt_on has True values)
     has_interrupt_tools = any(interrupt_on.values())
 
     if output_type is not None:
@@ -896,7 +889,6 @@ def create_deep_agent(  # noqa: C901
         # No custom output_type but interrupt_on is used
         agent_create_kwargs["output_type"] = [str, DeferredToolRequests]
 
-    # Build combined history processors list
     all_processors: list[Any] = list(history_processors or [])
 
     # patch_tool_calls capability is added later (see capabilities section below).
@@ -988,11 +980,9 @@ def create_deep_agent(  # noqa: C901
         effective_model_settings.update(model_settings)
     agent_create_kwargs["model_settings"] = effective_model_settings
 
-    # Apply instrumentation
     if instrument is not None:  # pragma: no cover
         agent_create_kwargs["instrument"] = instrument
 
-    # Build capabilities list
     all_capabilities: list[Any] = []
 
     if _patch_tool_calls:
