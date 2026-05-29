@@ -26,6 +26,10 @@ from pydantic_ai.toolsets import FunctionToolset
 # stubs happen to be present.
 _HAS_LITEPARSE = False
 _LiteParse: Any = None
+# Synthetic fallback that never matches a real exception. When liteparse exposes no
+# dedicated CLI-not-found class (>=2.x dropped it), keeping a never-matching class
+# means the parse handlers fall through to the generic "Parse error" branch instead
+# of mislabelling unrelated errors as "CLI not found".
 _CLINotFoundError: type[BaseException] = type("_CLINotFoundError", (Exception,), {})
 
 try:
@@ -34,8 +38,15 @@ try:
 except ImportError:  # pragma: no cover
     pass
 
-with contextlib.suppress(ImportError, AttributeError):
-    _CLINotFoundError = importlib.import_module("liteparse.types").CLINotFoundError
+# Resolve the CLI-not-found error class for the friendly handler, tolerating the fact
+# that liteparse has moved/renamed it across versions. Try each known location; the
+# last successful import wins, otherwise the synthetic fallback above is kept.
+# _HAS_LITEPARSE stays tied to LiteParse alone on purpose: parsing works without this
+# class (only the CLI-specific message degrades to the generic handler), so a missing
+# error class must NOT silently disable the entire toolset.
+for _cli_err_module in ("liteparse", "liteparse.types"):
+    with contextlib.suppress(ImportError, AttributeError):
+        _CLINotFoundError = importlib.import_module(_cli_err_module).CLINotFoundError
 
 
 _NOT_INSTALLED_MSG = (
