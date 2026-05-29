@@ -251,7 +251,7 @@ class TestMessageQueueIntegration:
                 await barrier.wait()
 
             task = asyncio.create_task(_fake_agent())
-            app._agent_task = task
+            app.agent_task = task
 
             # Submit steering input while agent is "running"
             chat.post_message(UserSubmitted(">>stop and summarise"))
@@ -292,7 +292,7 @@ class TestMessageQueueIntegration:
                 await barrier.wait()
 
             task = asyncio.create_task(_fake_agent())
-            app._agent_task = task
+            app.agent_task = task
 
             chat.post_message(UserSubmitted("when done, write a test"))
             await pilot.pause()

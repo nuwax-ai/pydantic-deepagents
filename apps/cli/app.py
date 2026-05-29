@@ -15,6 +15,7 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 
+from apps.cli.forking import CLIForkSession
 from apps.cli.screens.chat import ChatScreen
 from apps.cli.widgets.header import DeepHeader
 from apps.cli.widgets.status_bar import StatusBar
@@ -52,8 +53,6 @@ class DeepApp(App):
         Binding("f5", "show_context", "Context"),
     ]
 
-    # ── Reactive state ────────────────────────────────────────────
-
     is_streaming: reactive[bool] = reactive(False)
     model_name: reactive[str] = reactive("")
     app_version: reactive[str] = reactive("0.0.0")
@@ -62,8 +61,16 @@ class DeepApp(App):
     context_max: reactive[int] = reactive(0)
     total_cost: reactive[float] = reactive(0.0)
     current_cost: reactive[float] = reactive(0.0)
+    active_fork: reactive[CLIForkSession | None] = reactive(None)
+    fork_branch_count: reactive[int] = reactive(2)
+    fork_aggregate_budget_usd: reactive[float | None] = reactive["float | None"](None)
+    fork_branch_models: reactive[list[str | None]] = reactive(list, always_update=True)
+    fork_branch_budgets: reactive[list[float | None]] = reactive(list, always_update=True)
+    fork_merge_strategy: reactive[str] = reactive("auto_with_fallback")
+    fork_judge_model: reactive[str] = reactive("anthropic:claude-haiku-4-5")
+    fork_confidence_threshold: reactive[float] = reactive(0.80)
 
-    _agent_task: asyncio.Task[None] | None = None
+    agent_task: asyncio.Task[None] | None = None
 
     def __init__(
         self,
@@ -124,9 +131,31 @@ class DeepApp(App):
         except Exception:
             pass
 
+    def _seed_fork_settings_from_config(self) -> None:
+        """Pull the four fork CLI knobs out of ``config.toml`` into reactive state.
+
+        Run on mount so :class:`ForkPickerModal` sees the persisted values when
+        the user opens ``/fork``. Errors are swallowed deliberately — a corrupt
+        config should never break startup, just fall back to defaults.
+        """
+        try:
+            from apps.cli.config import load_config
+
+            config = load_config()
+            self.fork_branch_count = config.fork_branch_count
+            self.fork_aggregate_budget_usd = config.fork_aggregate_budget_usd
+            self.fork_branch_models = list(config.fork_branch_models)
+            self.fork_branch_budgets = list(config.fork_branch_budgets)
+            self.fork_merge_strategy = config.fork_merge_strategy
+            self.fork_judge_model = config.fork_judge_model
+            self.fork_confidence_threshold = config.fork_confidence_threshold
+        except Exception:  # pragma: no cover - defensive: bad config shouldn't break startup
+            pass
+
     def on_mount(self) -> None:
         self.model_name = self._model
         self.app_version = self._version
+        self._seed_fork_settings_from_config()
         self.push_screen(ChatScreen())
         # Sync state to widgets after screen is pushed
         self.call_later(self._sync_widgets)
@@ -298,6 +327,33 @@ class DeepApp(App):
         with contextlib.suppress(NoMatches, Exception):
             self.screen.query_one(StatusBar).current_cost = cost
 
+    def watch_active_fork(self, new: CLIForkSession | None) -> None:
+        """Drive fork view enter/exit on the chat screen when ``active_fork`` flips.
+
+        We only swallow :class:`NoMatches` here — that's the legitimate case
+        when the chat screen isn't the top screen (e.g. a modal is open and
+        catches the query). Any other exception is a real bug in the fork
+        view setup and is surfaced to the user via :meth:`notify` so the
+        fork doesn't silently fail to start / clean up.
+        """
+        screen = self.screen
+        action: tuple[str, Any] = (
+            ("enter_fork_view", new) if new is not None else ("exit_fork_view", None)
+        )
+        method_name, arg = action
+        handler = getattr(screen, method_name, None)
+        if handler is None:
+            return
+        try:
+            if arg is None:
+                handler()
+            else:
+                handler(arg)
+        except NoMatches:
+            pass
+        except Exception as exc:  # pragma: no cover - defensive surfacing
+            self.notify(f"Fork view error: {exc}", severity="error", timeout=10)
+
     # ── Command handling ──────────────────────────────────────────
 
     def handle_command(self, command: str) -> None:
@@ -364,16 +420,30 @@ class DeepApp(App):
 
     def action_interrupt(self) -> None:
         """Handle Ctrl+C — cancel running agent or exit."""
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
+        if self.agent_task and not self.agent_task.done():
+            self.agent_task.cancel()
             self.notify("Agent interrupted", severity="warning")
         else:
             self.exit()
 
     def action_escape_key(self) -> None:
-        """Handle Esc — interrupt running agent, or focus input if idle."""
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
+        """Handle Esc — fork-aware: terminate branch / abort fork, then interrupt, then focus."""
+        if self.active_fork is not None:
+            screen = self.screen
+            handler = getattr(screen, "fork_action_escape", None)
+            if handler is not None:
+                task = asyncio.create_task(handler())
+
+                def _on_fork_esc_done(t: asyncio.Task[Any]) -> None:
+                    exc = t.exception()
+                    if exc is not None:  # pragma: no cover - defensive surfacing
+                        self.notify(f"Fork Esc handler failed: {exc}", severity="error")
+
+                task.add_done_callback(_on_fork_esc_done)
+                return
+
+        if self.agent_task and not self.agent_task.done():
+            self.agent_task.cancel()
             self.notify("Agent interrupted", severity="warning")
         else:
             from apps.cli.widgets.input_area import InputArea

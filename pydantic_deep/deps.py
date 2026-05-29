@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pydantic_deep.capabilities.message_queue import MessageQueue
+    from pydantic_deep.toolsets.forking.coordinator import ForkCoordinator
 
 import chardet
 from pydantic_ai.usage import UsageLimits
@@ -15,9 +16,8 @@ from pydantic_ai_backends import BackendProtocol, StateBackend
 
 from pydantic_deep.types import FileData, Todo, UploadedFile
 
-#: Default usage limits for deep agents — no request limit.
-#: pydantic-ai defaults to ``request_limit=50`` which is too low for
-#: autonomous agents that routinely need 50-200+ requests on complex tasks.
+#: pydantic-ai's default ``request_limit=50`` is too low for autonomous agents
+#: that routinely need 50-200+ requests on complex tasks.
 DEFAULT_USAGE_LIMITS = UsageLimits(request_limit=None)
 
 
@@ -49,6 +49,11 @@ class DeepAgentDeps:
     message_queue: MessageQueue | None = field(
         default=None, repr=False
     )  # Shared queue for mid-run message delivery
+    fork_coordinator: ForkCoordinator | None = field(default=None, repr=False)
+    _fork_depth: int = field(default=0, repr=False)
+    _branch_cost_tracking: Any = field(default=None, repr=False)
+    _branch_id: str | None = field(default=None, repr=False)
+    _parent_fork_coordinator: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize backend with files if using StateBackend."""
