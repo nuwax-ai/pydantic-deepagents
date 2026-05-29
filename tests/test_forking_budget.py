@@ -169,6 +169,11 @@ async def test_fork_cost_returns_correct_breakdown_and_aggregate():
     b_tracker = coord.branches[b_id].cost_tracker
     assert isinstance(a_tracker, CostTracking)
     assert isinstance(b_tracker, CostTracking)
+    # fork_cost reads CostTracking.total_cost (_total_cost_usd), which only real
+    # priced runs accrue (TestModel has no pricing), so inject known cumulatives
+    # directly — this case tests fork_cost's per-branch/aggregate arithmetic. The
+    # self-cancel watcher path is covered by
+    # test_budget_watcher_cancels_running_branch_task below.
     a_tracker._total_cost_usd = 0.03
     b_tracker._total_cost_usd = 0.07
 
@@ -184,6 +189,48 @@ async def test_fork_cost_returns_correct_breakdown_and_aggregate():
     assert summary.aggregate_remaining_usd == pytest.approx(0.40)
 
     await _drain_branch_tasks(coord)
+
+
+async def test_budget_watcher_cancels_running_branch_task():
+    """An over-budget on_cost_update while the branch is still running cancels it.
+
+    Drives the public on_cost_update path from outside the test coroutine's
+    completion and asserts the branch task actually stopped (cancelled, state
+    budget_exhausted) and the agent did NOT run to completion.
+    """
+    deps = DeepAgentDeps(backend=StateBackend())
+    agent = _make_test_agent()
+
+    started = asyncio.Event()
+    completed = {"done": False}
+
+    async def _blocking_run(*_args: Any, **_kwargs: Any) -> Any:
+        started.set()
+        await asyncio.Event().wait()  # block until cancelled
+        completed["done"] = True  # pragma: no cover - never reached
+        return None
+
+    agent.run = _blocking_run  # type: ignore[method-assign]
+
+    coord = _make_coordinator(agent, deps)
+    handle = await coord.fork(
+        [BranchSpec(label="a", steer="a", budget_usd=0.10)],
+        parent_history=_seed_history("p"),
+    )
+    bid = handle.branches[0]
+    await started.wait()
+
+    rt = coord.branches[bid]
+    tracker = rt.cost_tracker
+    assert isinstance(tracker, CostTracking)
+
+    # Over-budget cost arrives mid-run → watcher terminates the running branch.
+    await tracker.on_cost_update(_cost_info(total=0.50))
+    await asyncio.sleep(0)
+
+    assert rt.task.cancelled()
+    assert rt.status.state == "budget_exhausted"
+    assert completed["done"] is False
 
 
 async def test_budget_exhausted_branch_can_be_picked_as_winner():
