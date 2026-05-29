@@ -888,7 +888,7 @@ async def test_coordinator_aclose_cancels_outstanding_tasks():
     assert rt.task.cancelled()
 
 
-async def test_coordinator_aclose_awaits_tasks_before_cleanup(tmp_path: Path):
+async def test_coordinator_aclose_awaits_tasks_before_cleanup(tmp_path: Path) -> None:
     """aclose must await cancelled branch tasks to quiescence *before* rmtree.
 
     Otherwise a branch still unwinding mid-write can recreate part of the fork
@@ -920,6 +920,7 @@ async def test_coordinator_aclose_awaits_tasks_before_cleanup(tmp_path: Path):
         parent_history=_seed_history("p"),
     )
     await started.wait()
+    assert coord.materializer is not None
     fork_dir = coord.materializer.root
     assert fork_dir.exists()
 
@@ -2117,13 +2118,9 @@ def test_rewrite_parent_root_only_on_path_boundaries() -> None:
     assert _rewrite_parent_root(f"cat '{root}/a.py'", root, snap) == f"cat '{snap}/a.py'"
 
     # A sibling sharing the prefix must NOT be mangled.
-    assert (
-        _rewrite_parent_root(f"cat {root}_backup/x", root, snap) == f"cat {root}_backup/x"
-    )
+    assert _rewrite_parent_root(f"cat {root}_backup/x", root, snap) == f"cat {root}_backup/x"
     # The root inside an unrelated literal token must NOT be rewritten.
-    assert (
-        _rewrite_parent_root(f"echo {root}xyz", root, snap) == f"echo {root}xyz"
-    )
+    assert _rewrite_parent_root(f"echo {root}xyz", root, snap) == f"echo {root}xyz"
 
     # Empty root is a no-op.
     assert _rewrite_parent_root("ls -la", "", snap) == "ls -la"
@@ -2166,6 +2163,25 @@ def test_copy_tree_recurses_into_subdirectory(tmp_path: Path) -> None:
     # Writing into the copy must not touch the source (the isolation guarantee).
     (dst / "root_file.py").write_text("branch-modified")
     assert (src / "root_file.py").read_text() == "root"
+
+
+def test_copy_tree_skips_unreadable_entry(tmp_path: Path) -> None:
+    """_copy_tree logs and skips an entry it can't copy (e.g. a dangling symlink)."""
+    from pydantic_deep.toolsets.forking.isolation import _copy_tree
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "good.py").write_text("ok")
+    # Dangling symlink: copy2(follow_symlinks=True) raises FileNotFoundError (OSError).
+    (src / "dangling.py").symlink_to(tmp_path / "missing-target.py")
+
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    _copy_tree(src, dst)
+
+    # The good file is copied; the unreadable entry is skipped (absent), no raise.
+    assert (dst / "good.py").read_text() == "ok"
+    assert not (dst / "dangling.py").exists()
 
 
 # ---------------------------------------------------------------------------

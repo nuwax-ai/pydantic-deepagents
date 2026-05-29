@@ -1076,9 +1076,7 @@ class TestForkOpenDiffCommand:
             modal.action_pick_selected()
             await pilot.pause()
             assert fork_app.active_fork is active_before
-            assert not any(
-                isinstance(s, MergePickerModal) for s in fork_app.screen_stack
-            )
+            assert not any(isinstance(s, MergePickerModal) for s in fork_app.screen_stack)
             await session.abort()
 
     async def test_open_diff_without_active_fork_notifies(self, fork_app: DeepApp) -> None:

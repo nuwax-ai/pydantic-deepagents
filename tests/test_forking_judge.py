@@ -176,7 +176,7 @@ async def test_run_judges_vote_returns_list_of_per_judge_usages():
     the single-judge path returns a scalar — pin that type divergence."""
     from unittest.mock import patch
 
-    from pydantic_deep.toolsets.forking.coordinator import JudgeVerdict as _JV
+    from pydantic_deep.types import JudgeVerdict as _JV
 
     coord, _deps = await _coordinator_with_two_branches()
     a_id = _resolve_winner_id(coord, "a")
@@ -855,9 +855,10 @@ async def test_resolve_cache_misses_on_different_threshold():
 
     # ... a re-resolve with a *different* threshold must re-run the judge, not
     # return the stale outcome. Different keys → cache miss.
-    assert _strategy_cache_key(
-        MergeStrategy(kind="auto_with_fallback", confidence_threshold=0.50)
-    ) != coord._cached_outcome_key
+    assert (
+        _strategy_cache_key(MergeStrategy(kind="auto_with_fallback", confidence_threshold=0.50))
+        != coord._cached_outcome_key
+    )
 
 
 async def test_majority_pick_dedupes_caveats_across_same_winner_verdicts():

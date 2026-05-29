@@ -126,7 +126,7 @@ This is a test skill.
         """
         seen: set[int] = set()
 
-        def find_console(obj: object):
+        def find_console(obj: object) -> object | None:
             if id(obj) in seen:
                 return None
             seen.add(id(obj))
