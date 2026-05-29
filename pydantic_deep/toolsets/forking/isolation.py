@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -84,6 +85,21 @@ def _rel_under(parent_root: Path, path: str) -> Path:
         return Path(path).relative_to(parent_root)
     except ValueError:
         return Path(path.lstrip("/"))
+
+
+def _rewrite_parent_root(command: str, parent_root: str, snap: str) -> str:
+    """Rewrite absolute ``parent_root`` references in ``command`` to ``snap``.
+
+    Only path-boundary matches are rewritten — ``parent_root`` must be followed
+    by a path separator, the end of the string, or a shell token boundary
+    (whitespace or a quote). A naive ``str.replace`` would mangle a sibling path
+    that merely shares the prefix (``/home/u/proj`` rewriting inside
+    ``/home/u/proj_backup/x``) or the root appearing inside an unrelated literal.
+    """
+    if not parent_root:
+        return command
+    pattern = re.escape(parent_root) + r"(?=/|$|[\s'\"])"
+    return re.sub(pattern, lambda _m: snap, command)
 
 
 def _copy_tree(src: Path, dst: Path) -> None:
@@ -556,7 +572,7 @@ class BranchOverlay:
         with _branch_snapshot(parent_root, self._overlay, self._changes, self._deleted) as snap:
             snap_path = Path(snap)
             pre = _snapshot_state(snap_path)
-            cmd = command.replace(str(parent_root), snap)
+            cmd = _rewrite_parent_root(command, str(parent_root), snap)
             try:
                 proc = subprocess.run(
                     ["sh", "-c", cmd],

@@ -2068,6 +2068,36 @@ def test_collect_state_does_not_record_nonempty_directories(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
+# _rewrite_parent_root — path-boundary rewriting (no naive substring replace)
+# ---------------------------------------------------------------------------
+
+
+def test_rewrite_parent_root_only_on_path_boundaries() -> None:
+    from pydantic_deep.toolsets.forking.isolation import _rewrite_parent_root
+
+    root = "/home/u/proj"
+    snap = "/tmp/snap"
+
+    # Boundary matches ARE rewritten: separator, end-of-string, whitespace, quote.
+    assert _rewrite_parent_root(f"cat {root}/a.py", root, snap) == f"cat {snap}/a.py"
+    assert _rewrite_parent_root(f"cd {root}", root, snap) == f"cd {snap}"
+    assert _rewrite_parent_root(f"ls {root} -la", root, snap) == f"ls {snap} -la"
+    assert _rewrite_parent_root(f"cat '{root}/a.py'", root, snap) == f"cat '{snap}/a.py'"
+
+    # A sibling sharing the prefix must NOT be mangled.
+    assert (
+        _rewrite_parent_root(f"cat {root}_backup/x", root, snap) == f"cat {root}_backup/x"
+    )
+    # The root inside an unrelated literal token must NOT be rewritten.
+    assert (
+        _rewrite_parent_root(f"echo {root}xyz", root, snap) == f"echo {root}xyz"
+    )
+
+    # Empty root is a no-op.
+    assert _rewrite_parent_root("ls -la", "", snap) == "ls -la"
+
+
+# ---------------------------------------------------------------------------
 # _copy_tree — subdirectory recursion and _SNAP_SKIP_DIRS skip
 # ---------------------------------------------------------------------------
 
