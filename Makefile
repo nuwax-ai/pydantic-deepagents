@@ -9,9 +9,14 @@
 	@pre-commit -V || echo 'Please install pre-commit: https://pre-commit.com/'
 
 .PHONY: install
-install: .uv .pre-commit ## Install the package, dependencies, and pre-commit for local development
-	uv sync --frozen --all-extras --group dev --group lint --group docs
+install: .uv .pre-commit ## Install the package in editable mode with all extras for local development
+	uv sync --all-extras --group dev --group lint --group docs
+	uv pip install -e .
 	uv run pre-commit install --install-hooks
+	@echo ""
+	@echo "✅ pydantic-deep installed in editable mode"
+	@echo "   CLI: uv run pydantic-deep --help"
+	@echo "   Python: import pydantic_deep"
 
 .PHONY: install-all-python
 install-all-python: ## Install and synchronize an interpreter for every python version
